@@ -29,7 +29,8 @@ _Avoid_: "issue" for Task (GitHub vocabulary), "swimlane" (work board has none),
 
 - `kf init` — planned. Verify token, fetch board, interactively map columns → canonical states, store user ID, write `.mpx/kanbanflow.json`.
 - `kf auth login` — planned. Token into Windows Credential Manager (`keyring` crate); `KANBANFLOW_TOKEN` env overrides.
-- `kf task create|view|list|edit|move|delete` — planned. Reference by task number; `view --download-attachments <dir>`; `move --to <canonical-state>`.
+- `kf task grab|finish` — planned. Compound workflow verbs: `grab` = assign me + move to WIP + aggregated view + image downloads; `finish` = comment from `--comment-file` + move + optional `--check-subtasks`.
+- `kf task create|view|list|edit|move|delete` — planned. Reference by task number; `create --attach <file>...` (create + uploads, labels validated, never created implicitly); `view` aggregates task + comments + attachments, `--download-attachments <dir>`; `edit --append-description` (lossless server-side merge); `move --to <canonical-state>`.
 - `kf attach add|list|download|delete` — planned. The image round-trip.
 - `kf comment add|list|edit|delete` — planned.
 - `kf subtask add|list|check|uncheck` — planned.
@@ -41,7 +42,8 @@ _Avoid_: "issue" for Task (GitHub vocabulary), "swimlane" (work board has none),
 - API token is per-board and premium-only; work-board token pending admin (author's role sees no Settings menu on Team E).
 - Rate limit: 1000 requests/hour/board; >5000/day locks the token. Cache board metadata; be frugal.
 - Shared team board: never move/edit tasks whose responsible user isn't you (unless `--force`); never create labels implicitly.
-- Attachment download links expire (`linkExpiresTimestamp`); download immediately, never store links.
+- Attachment download links expire (`linkExpiresTimestamp`, ~24h); download immediately, never store links.
+- `GET /tasks/<id>` returns subtasks/labels/custom fields inline but never comments or attachments — a full task read is 3 API calls (task, comments, attachments). Verified 2026-07-31 on sandbox.
 - No secrets in the repo — token via Credential Manager or `KANBANFLOW_TOKEN` only.
 - Work board pairs with GitLab (`gitlab.verotel.cz`); auto-move triggers fire from `glab` MR events in skills, not webhooks.
 - `--json` on every read command; meaningful exit codes — the agent contract.

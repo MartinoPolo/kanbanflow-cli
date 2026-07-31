@@ -67,6 +67,13 @@ What: Every read command supports `--json`; write commands return the affected t
 Why: Mirrors the `gh --json` contract agents already script against; the download flag turns image-reading into one step.
 Rejected: JSON-only output (hostile to the human half of the workflow).
 
+### Compound workflow commands over agent orchestration
+
+Decided: 2026-07-31
+What: First-class compound commands collapse multi-step agent dances: `kf task grab` (assign me + move to WIP + aggregated view + image downloads), `kf task finish` (comment from file + move + optional subtask check-off), `view` aggregating task+comments+attachments (the API forces 3 calls), `create --attach` (create + uploads + label validation), `edit --append-description` (lossless server-side merge).
+Why: Every scripted step replaces an agentic step — deterministic, cheaper, faster; skills shrink to composing content and running one command.
+Rejected: `kf next` (picking policy belongs in skills; CLI stays mechanical); `link-mr` and `watch` commands (no demonstrated need); leaving orchestration to agents (the pain this project exists to remove).
+
 ## Scope & Integration
 
 ### v1 scope: tasks, attachments, comments, subtasks, labels-read, board, init, auth
