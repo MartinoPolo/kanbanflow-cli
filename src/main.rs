@@ -1,11 +1,17 @@
+//! `kf` binary entry point: parse, dispatch, map errors to exit codes.
+
 use clap::Parser;
 
-/// CLI for KanbanFlow — scaffold only, no commands implemented yet.
-#[derive(Parser)]
-#[command(name = "kf", version, about, long_about = None)]
-struct Cli {}
+use kanbanflow_cli::cli::Cli;
+use kanbanflow_cli::exit;
 
-fn main() {
-    let _cli = Cli::parse();
-    println!("kf — KanbanFlow CLI (scaffold, no commands implemented yet)");
+fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+    match cli.run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::ExitCode::from(exit::classify(&error) as u8)
+        }
+    }
 }

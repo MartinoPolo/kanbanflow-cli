@@ -1,0 +1,284 @@
+//! Per-repo board configuration stored at `.mpx/kanbanflow.json`.
+//!
+//! The file is committed: column IDs are not secrets, and the canonical-state
+//! mapping is what keeps `kf-` skills board-agnostic. The token never lives here.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Path of the config file relative to a repo root.
+pub const CONFIG_RELATIVE_PATH: &str = ".mpx/kanbanflow.json";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error(
+        "No `{CONFIG_RELATIVE_PATH}` found in this directory or any parent. Run `kf init` first."
+    )]
+    NotFound,
+    #[error("Could not read `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Could not write `{path}`: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{path}` is not valid kanbanflow config JSON: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("No column is mapped to the `{state}` state in `{CONFIG_RELATIVE_PATH}`. Re-run `kf init` to map it.")]
+    UnmappedState { state: CanonicalState },
+}
+
+/// Board-agnostic workflow states; `kf init` maps each to a real column ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[value(rename_all = "lowercase")]
+pub enum CanonicalState {
+    Todo,
+    Wip,
+    Review,
+    Done,
+    Archive,
+}
+
+impl CanonicalState {
+    pub const ALL: [CanonicalState; 5] = [
+        CanonicalState::Todo,
+        CanonicalState::Wip,
+        CanonicalState::Review,
+        CanonicalState::Done,
+        CanonicalState::Archive,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CanonicalState::Todo => "todo",
+            CanonicalState::Wip => "wip",
+            CanonicalState::Review => "review",
+            CanonicalState::Done => "done",
+            CanonicalState::Archive => "archive",
+        }
+    }
+}
+
+impl std::fmt::Display for CanonicalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CanonicalState {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "todo" | "to-do" | "to_do" => Ok(CanonicalState::Todo),
+            "wip" | "in-progress" | "inprogress" => Ok(CanonicalState::Wip),
+            "review" => Ok(CanonicalState::Review),
+            "done" => Ok(CanonicalState::Done),
+            "archive" | "archived" => Ok(CanonicalState::Archive),
+            other => Err(format!(
+                "unknown state `{other}`; expected one of todo, wip, review, done, archive"
+            )),
+        }
+    }
+}
+
+/// Canonical state → column ID. A state may be unmapped when the board has no
+/// matching column (e.g. a board without a Review lane).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateColumns {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<String>,
+}
+
+impl StateColumns {
+    pub fn get(&self, state: CanonicalState) -> Option<&str> {
+        let column = match state {
+            CanonicalState::Todo => &self.todo,
+            CanonicalState::Wip => &self.wip,
+            CanonicalState::Review => &self.review,
+            CanonicalState::Done => &self.done,
+            CanonicalState::Archive => &self.archive,
+        };
+        column.as_deref()
+    }
+
+    pub fn set(&mut self, state: CanonicalState, column_id: Option<String>) {
+        let slot = match state {
+            CanonicalState::Todo => &mut self.todo,
+            CanonicalState::Wip => &mut self.wip,
+            CanonicalState::Review => &mut self.review,
+            CanonicalState::Done => &mut self.done,
+            CanonicalState::Archive => &mut self.archive,
+        };
+        *slot = column_id;
+    }
+}
+
+/// Contents of `.mpx/kanbanflow.json`. Field order is the on-disk key order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(rename = "boardId")]
+    pub board_id: String,
+    #[serde(rename = "boardName")]
+    pub board_name: String,
+    /// The user ID the API token acts as; basis for the ownership guardrail.
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    pub states: StateColumns,
+}
+
+impl Config {
+    /// Walk up from `start` looking for `.mpx/kanbanflow.json`.
+    pub fn find_path(start: &Path) -> Option<PathBuf> {
+        start.ancestors().find_map(|directory| {
+            let candidate = directory.join(".mpx").join("kanbanflow.json");
+            candidate.is_file().then_some(candidate)
+        })
+    }
+
+    /// Load the config found by searching upward from the current directory.
+    pub fn load() -> Result<Self, ConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| ConfigError::Read {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        let path = Config::find_path(&cwd).ok_or(ConfigError::NotFound)?;
+        Config::load_from(&path)
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        serde_json::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Write pretty-printed JSON, creating `.mpx/` if needed.
+    pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            }
+        }
+        let mut json = serde_json::to_string_pretty(self).expect("config is always serializable");
+        json.push('\n');
+        std::fs::write(path, json).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// `<cwd>/.mpx/kanbanflow.json` — where `kf init` writes a fresh config.
+    pub fn default_path() -> Result<PathBuf, ConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| ConfigError::Read {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Ok(cwd.join(".mpx").join("kanbanflow.json"))
+    }
+
+    pub fn column_id(&self, state: CanonicalState) -> Result<&str, ConfigError> {
+        self.states
+            .get(state)
+            .ok_or(ConfigError::UnmappedState { state })
+    }
+
+    /// Reverse lookup used when printing a task's state instead of its column.
+    pub fn state_for_column(&self, column_id: &str) -> Option<CanonicalState> {
+        CanonicalState::ALL
+            .into_iter()
+            .find(|state| self.states.get(*state) == Some(column_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Config {
+        Config {
+            board_id: "F2QMK1B".to_string(),
+            board_name: "My first board".to_string(),
+            user_id: "UHJ9JgtA".to_string(),
+            states: StateColumns {
+                todo: Some("C9LIn5sEEpqT".to_string()),
+                wip: Some("CBO1VNGqDc4K".to_string()),
+                review: None,
+                done: Some("COxkPjd0wra4".to_string()),
+                archive: None,
+            },
+        }
+    }
+
+    #[test]
+    fn config_round_trips_through_json() {
+        let config = sample();
+        let json = serde_json::to_string_pretty(&config).expect("serializable");
+        let parsed: Config = serde_json::from_str(&json).expect("deserializable");
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn config_json_keys_are_stable_and_skip_unmapped_states() {
+        let json = serde_json::to_string(&sample()).expect("serializable");
+        assert_eq!(
+            json,
+            r#"{"boardId":"F2QMK1B","boardName":"My first board","userId":"UHJ9JgtA","states":{"todo":"C9LIn5sEEpqT","wip":"CBO1VNGqDc4K","done":"COxkPjd0wra4"}}"#
+        );
+    }
+
+    #[test]
+    fn canonical_state_parses_aliases_and_rejects_junk() {
+        assert_eq!("TODO".parse::<CanonicalState>(), Ok(CanonicalState::Todo));
+        assert_eq!(
+            " in-progress ".parse::<CanonicalState>(),
+            Ok(CanonicalState::Wip)
+        );
+        assert_eq!(
+            "archived".parse::<CanonicalState>(),
+            Ok(CanonicalState::Archive)
+        );
+        assert!("backlog".parse::<CanonicalState>().is_err());
+    }
+
+    #[test]
+    fn column_lookup_is_bidirectional() {
+        let config = sample();
+        assert_eq!(
+            config.column_id(CanonicalState::Wip).expect("mapped"),
+            "CBO1VNGqDc4K"
+        );
+        assert!(config.column_id(CanonicalState::Review).is_err());
+        assert_eq!(
+            config.state_for_column("COxkPjd0wra4"),
+            Some(CanonicalState::Done)
+        );
+        assert_eq!(config.state_for_column("Cunknown"), None);
+    }
+}
