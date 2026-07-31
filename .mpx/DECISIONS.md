@@ -1,0 +1,91 @@
+# DECISIONS
+
+## Platform & Infrastructure
+
+### Rust with clap + reqwest + serde + keyring
+
+Decided: 2026-07-31
+What: The CLI is Rust; `clap` for commands, `reqwest` for HTTP, `serde` for JSON, `keyring` for token storage.
+Why: Single static binary with ~5ms startup fits "one-shot it and it just works"; `keyring` gives Windows Credential Manager for free; author steers, agents write all code.
+Rejected: TypeScript/Node (runtime dependency, ~80ms startup per agent call); Go (equally viable, lost on token-storage story and author's Rust curiosity).
+
+### Distribution via GitHub releases with cargo-dist
+
+Decided: 2026-07-31
+What: Private GitHub repo `kanbanflow-cli` under the personal account; `cargo-dist` generates installers when publishing becomes desirable.
+Why: Zero publishing effort now, one-command path to shell/PowerShell installers, npm shim, and Homebrew tap later.
+Rejected: npm-first distribution (ties binary to Node); publishing publicly at v0 (premature).
+
+### Binary named kf, repo named kanbanflow-cli
+
+Decided: 2026-07-31
+What: Two-letter binary `kf`, gh-style grammar `kf <noun> <verb>` with KanbanFlow nouns (`task`, not `issue`).
+Why: Matches `gh`/`glab` muscle memory for agents and human; honest domain vocabulary.
+Rejected: `kbf`/`kanban` (longer, no clarity gained); mimicking gh's `issue` noun (pretends wrong domain).
+
+### API docs vendored as Markdown with a repeatable scraper
+
+Decided: 2026-07-31
+What: All 57 pages of kanbanflow.com/api-docs scraped to `docs/api/*.md`; scraper (`scripts/scrape-docs.mjs`, Node + turndown) committed for refreshes.
+Why: Docs are server-rendered static HTML, trivially scrapable; a local snapshot makes agent-driven maintenance self-contained.
+Rejected: Scrape-on-demand (needless network dependency; docs rarely change).
+
+## CLI Design
+
+### Tasks referenced by board number, IDs accepted
+
+Decided: 2026-07-31
+What: Commands take `E613`-style task numbers (resolved via get-tasks) or raw task IDs interchangeably.
+Why: Numbers are what humans and the board UI show; the API's `number` object (`{prefix, value}`) makes resolution reliable.
+Rejected: ID-only interface (unusable for humans reading the board).
+
+### Canonical workflow states mapped per-board in .mpx/kanbanflow.json
+
+Decided: 2026-07-31
+What: `kf task move --to todo|wip|review|done|archive` resolves through a committed per-repo mapping written by `kf init`; column IDs are not secrets.
+Why: Skills and agents stay portable across boards with different column names; auto-move triggers (start work → wip, MR open → review, MR merged → done) live in skills.
+Rejected: Raw column names/IDs in every call (brittle, board-specific); webhooks for auto-move (needs a 24/7 public listener; a CLI cannot receive them).
+
+### Token in Windows Credential Manager, env var override
+
+Decided: 2026-07-31
+What: `kf auth login` stores the per-board token via `keyring`; `KANBANFLOW_TOKEN` overrides for dev/CI; nothing token-shaped ever in files.
+Why: Shared-board credentials deserve OS-level storage; env override keeps agents and CI simple.
+Rejected: Config-file token (leak risk in a repo-adjacent file); env-only (no persistence across shells).
+
+### Shared-board guardrails on by default
+
+Decided: 2026-07-31
+What: Refuse to move/edit/delete a task whose responsible user isn't the token's user unless `--force`; never create labels implicitly.
+Why: Team E is a shared board with 17 members; agent mistakes must not disturb teammates' cards.
+Rejected: Trust-the-agent default (one bad loop spams the whole team).
+
+### Agent output contract: --json everywhere, human tables by default
+
+Decided: 2026-07-31
+What: Every read command supports `--json`; write commands return the affected task number/ID; `view --download-attachments <dir>` saves images for agents to Read.
+Why: Mirrors the `gh --json` contract agents already script against; the download flag turns image-reading into one step.
+Rejected: JSON-only output (hostile to the human half of the workflow).
+
+## Scope & Integration
+
+### v1 scope: tasks, attachments, comments, subtasks, labels-read, board, init, auth
+
+Decided: 2026-07-31
+What: In v1: full task CRUD + move, attachment round-trip, comments, subtasks, `label list`, `board`, `init`, `auth login`. Out: hierarchy/relations, time tracking, webhooks, move-between-boards, custom fields.
+Why: Covers everything observed in real Team E usage (subtask checklists included); work team uses no PRD/sub-issue hierarchy.
+Rejected: Time tracking (author doesn't use it); webhooks (see auto-move decision); custom fields (deferred until work token reveals actual fields).
+
+### Dedicated kf- skills instead of provider-switching existing skills
+
+Decided: 2026-07-31
+What: New `kf-task-create`, `kf-task-view`, `kf-task-edit` skills live in this repo under `skills/` and get symlinked into projects that use KanbanFlow.
+Why: Work environment needs only a small skill set; symlink selection replaces any `MPX_TICKETING` switching variable; existing 13 gh-hardcoded skills stay untouched.
+Rejected: Conditional branches in existing skills (13 mechanical edits, ongoing dual-path maintenance); a gh-compatible facade (GitHub concepts don't map 1:1).
+
+### KanbanFlow CLI replaces the Obsidian board workaround
+
+Decided: 2026-07-31
+What: For KanbanFlow projects, images attach to tasks directly; the `.mpx/BOARD.md` + vault-junction pattern from BOARD_CONVENTION.md is not used.
+Why: The workaround existed only because gh cannot round-trip images; the KanbanFlow API can.
+Rejected: Running both systems side by side (duplicate state, two sources of truth).

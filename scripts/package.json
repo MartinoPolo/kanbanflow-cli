@@ -1,0 +1,9 @@
+{
+  "name": "kanbanflow-cli-scripts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "turndown": "^7",
+    "turndown-plugin-gfm": "^1"
+  }
+}
