@@ -12,6 +12,7 @@ use clap::{Args, Subcommand};
 
 use crate::api::models::Board;
 use crate::api::Client;
+use crate::boards;
 use crate::config::Config;
 use crate::output;
 use crate::token;
@@ -60,8 +61,10 @@ fn login(args: LoginArgs) -> anyhow::Result<()> {
     let (_client, board) = verify_token(&api_token)?;
     token::store(&board.id, &api_token)
         .with_context(|| format!("storing the token for board `{}`", board.id))?;
+    remember_board(&board.id, &board.name);
 
     println!("Stored the token for {} ({}).", board.name, board.id);
+    println!("`kf init` in any repo can now use it without asking for the token again.");
     if token::from_env().is_some() {
         println!(
             "Note: {} is set and takes precedence over the stored token.",
@@ -88,6 +91,8 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
         "none".to_string()
     };
 
+    let registry = boards::load();
+
     if args.json {
         return output::print_json(&serde_json::json!({
             "source": source,
@@ -95,6 +100,7 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
             "storedInCredentialStore": stored,
             "boardId": config.as_ref().map(|config| config.board_id.as_str()),
             "boardName": config.as_ref().map(|config| config.board_name.as_str()),
+            "knownBoards": registry.boards,
         }))
         .map_err(Into::into);
     }
@@ -107,10 +113,26 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
             crate::config::CONFIG_RELATIVE_PATH
         ),
     }
-    if source == "none" {
+    if registry.boards.is_empty() {
+        println!("Logged in to: no board yet");
+    } else {
+        println!("Logged in to: {}", registry.describe());
+    }
+    if source == "none" && config.is_none() && !registry.boards.is_empty() {
+        println!("Run `kf init` here to wire this repo to one of them.");
+    } else if source == "none" {
         println!("Run `kf auth login` or set {}.", token::TOKEN_ENV_VAR);
     }
     Ok(())
+}
+
+/// Record the board in the user-level registry so a later `kf init` can find
+/// its token. A failure here is a warning: the token is stored either way, and
+/// the registry is only a lookup aid.
+pub(crate) fn remember_board(board_id: &str, board_name: &str) {
+    if let Err(error) = boards::remember(board_id, board_name) {
+        eprintln!("warning: could not record the board in the registry: {error}");
+    }
 }
 
 /// True when the credential store holds a token for this board. The keyring is
@@ -137,6 +159,9 @@ pub(crate) fn verify_token(api_token: &str) -> anyhow::Result<(Client, Board)> {
 }
 
 /// Token from, in order: the `--token` flag, stdin, a file, an interactive prompt.
+///
+/// Whatever the source, the value is a paste from a browser, so it is sanitized
+/// here — the single funnel for human-supplied tokens.
 pub(crate) fn read_token(
     flag: Option<String>,
     from_stdin: bool,
@@ -151,15 +176,17 @@ pub(crate) fn read_token(
             .with_context(|| format!("reading the API token from `{}`", path.display()))?,
         (None, false, None) => prompt_for_token()?,
     };
-    let api_token = raw.trim().to_string();
-    if api_token.is_empty() {
-        anyhow::bail!("the API token is empty");
+    let sanitized = token::sanitize(&raw)?;
+    if let Some(note) = sanitized.note() {
+        eprintln!("{note}");
     }
-    Ok(api_token)
+    Ok(sanitized.token)
 }
 
-/// Ask for the token on the terminal. Input is echoed — hiding it would need a
-/// new dependency (`rpassword`), so the prompt points at the piping alternative.
+/// Ask for the token on the terminal, with the input hidden.
+///
+/// The return value is raw: `read_token` is the only place that sanitizes, so
+/// every source is cleaned by the same rules.
 pub(crate) fn prompt_for_token() -> anyhow::Result<String> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
@@ -168,13 +195,21 @@ pub(crate) fn prompt_for_token() -> anyhow::Result<String> {
             token::TOKEN_ENV_VAR
         );
     }
-    eprintln!(
-        "Paste your KanbanFlow API token (it will be visible; \
-         `printf %s \"$TOKEN\" | kf auth login --token-stdin` keeps it out of shell history)."
-    );
-    eprint!("Token: ");
-    std::io::stderr().flush().ok();
-    read_line_from_stdin()
+    eprintln!("Paste your KanbanFlow API token (the input stays hidden).");
+    match rpassword::prompt_password("Token: ") {
+        Ok(token) => Ok(token),
+        // Terminals that cannot switch off echo (some emulators, redirected
+        // consoles) would otherwise leave no way to type a token at all.
+        Err(error) => {
+            eprintln!(
+                "warning: could not hide the input ({error}); it will be visible. \
+                 `printf %s \"$TOKEN\" | kf auth login --token-stdin` avoids the terminal."
+            );
+            eprint!("Token: ");
+            std::io::stderr().flush().ok();
+            read_line_from_stdin()
+        }
+    }
 }
 
 /// One line from stdin, without its trailing newline.
@@ -184,6 +219,10 @@ pub(crate) fn read_line_from_stdin() -> anyhow::Result<String> {
         .lock()
         .read_line(&mut line)
         .context("reading from stdin")?;
+    // The newline is a control character: left in place it reaches the
+    // `Authorization` header and makes it unparseable.
+    let length = line.trim_end_matches(['\r', '\n']).len();
+    line.truncate(length);
     Ok(line)
 }
 

@@ -8,7 +8,8 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::blocking::multipart;
+use reqwest::blocking::{multipart, RequestBuilder};
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -24,6 +25,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum ApiError {
     #[error("KanbanFlow rejected the API token (401 Unauthorized). Run `kf auth login` with a valid token.")]
     Unauthorized,
+    #[error(
+        "the API token cannot be sent in an HTTP header: it holds a character outside printable \
+         ASCII (often a stray control character from a paste). Run `kf auth login --token-stdin` \
+         with the token piped in, or copy it again from Menu → Settings → API & Webhooks."
+    )]
+    UnusableToken,
     #[error("KanbanFlow refused the request (403 Forbidden): {message}")]
     Forbidden { message: String },
     #[error("Not found (404): {message}")]
@@ -45,7 +52,7 @@ pub enum ApiError {
 /// Authenticated client bound to one board (KanbanFlow tokens are per-board).
 pub struct Client {
     http: reqwest::blocking::Client,
-    token: String,
+    authorization: HeaderValue,
     base_url: String,
 }
 
@@ -56,14 +63,21 @@ impl Client {
     }
 
     /// Build a client against an arbitrary base URL (tests, staging).
+    ///
+    /// The `Authorization` header is parsed here rather than per request: an
+    /// unusable token then fails once, with a message that names the cause,
+    /// instead of surfacing as `reqwest`'s opaque "failed to parse header value"
+    /// from whichever call happened to go first.
     pub fn with_base_url(token: String, base_url: String) -> Result<Self, ApiError> {
+        let authorization = HeaderValue::try_from(format!("Bearer {token}"))
+            .map_err(|_| ApiError::UnusableToken)?;
         let http = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("kf/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             http,
-            token,
+            authorization,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
@@ -73,6 +87,13 @@ impl Client {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
+    /// Attach the board's credentials. Every request to the API goes through
+    /// here; attachment downloads deliberately do not (see `download_to_file`).
+    fn authorized(&self, builder: RequestBuilder) -> RequestBuilder {
+        // Cloning a HeaderValue clones a refcounted buffer, not the bytes.
+        builder.header(AUTHORIZATION, self.authorization.clone())
+    }
+
     /// GET returning a deserialized body. `query` pairs are URL-encoded.
     pub fn get_json<T: DeserializeOwned>(
         &self,
@@ -80,7 +101,7 @@ impl Client {
         query: &[(&str, String)],
     ) -> Result<T, ApiError> {
         let url = self.url(path);
-        let response = self.send(|| self.http.get(&url).bearer_auth(&self.token).query(query))?;
+        let response = self.send(|| self.authorized(self.http.get(&url)).query(query))?;
         parse_json(response)
     }
 
@@ -105,13 +126,13 @@ impl Client {
         body: &B,
     ) -> Result<reqwest::blocking::Response, ApiError> {
         let url = self.url(path);
-        self.send(|| self.http.post(&url).bearer_auth(&self.token).json(body))
+        self.send(|| self.authorized(self.http.post(&url)).json(body))
     }
 
     /// DELETE; the API returns no meaningful body.
     pub fn delete(&self, path: &str) -> Result<(), ApiError> {
         let url = self.url(path);
-        self.send(|| self.http.delete(&url).bearer_auth(&self.token))
+        self.send(|| self.authorized(self.http.delete(&url)))
             .map(|_| ())
     }
 
@@ -128,9 +149,7 @@ impl Client {
             Ok(multipart::Form::new().file("file", file_path)?)
         };
         let response = match self
-            .http
-            .post(&url)
-            .bearer_auth(&self.token)
+            .authorized(self.http.post(&url))
             .multipart(build_form()?)
             .send()
         {
@@ -138,9 +157,7 @@ impl Client {
                 match retry_delay(&response) {
                     Some(delay) => {
                         std::thread::sleep(delay);
-                        self.http
-                            .post(&url)
-                            .bearer_auth(&self.token)
+                        self.authorized(self.http.post(&url))
                             .multipart(build_form()?)
                             .send()?
                     }
@@ -280,4 +297,27 @@ fn parse_json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res
             ApiError::Decode(error)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clean_token_builds_a_client() {
+        assert!(Client::new("6FsUJdDqjyQj9Gfk29dLcgAJSM".to_string()).is_ok());
+    }
+
+    /// The prompt used to hand the line's trailing newline straight through, and
+    /// the resulting header failure surfaced as `reqwest`'s "builder error".
+    #[test]
+    fn a_token_with_a_control_character_is_refused_by_name() {
+        for token in ["6FsUJdDqjy\n", "6FsUJdDqjy\r\n", "6FsUJd\u{7f}Dqjy"] {
+            assert!(
+                matches!(Client::new(token.to_string()), Err(ApiError::UnusableToken)),
+                "expected `{}` to be refused as unusable",
+                token.escape_debug()
+            );
+        }
+    }
 }

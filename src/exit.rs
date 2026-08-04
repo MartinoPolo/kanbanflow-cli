@@ -48,7 +48,7 @@ pub fn classify(error: &anyhow::Error) -> i32 {
 /// The single place an `ApiError` variant becomes an exit code.
 fn for_api_error(error: &ApiError) -> i32 {
     match error {
-        ApiError::Unauthorized => AUTH,
+        ApiError::Unauthorized | ApiError::UnusableToken => AUTH,
         ApiError::NotFound { .. } => NOT_FOUND,
         ApiError::RateLimited { .. } => RATE_LIMITED,
         _ => FAILURE,

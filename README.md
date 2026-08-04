@@ -20,12 +20,16 @@ cargo install --path .         # or install straight into ~/.cargo/bin
 
 Prebuilt cargo-dist installers are planned but **not yet published**.
 
-First run, from the repo you want to wire to a board:
+Authenticate **once per board**, then wire up as many repos as you like:
 
 ```bash
-kf auth login                  # store the board's API token
-kf init                        # verify it, map columns to canonical states, write .mpx/kanbanflow.json
+kf auth login                  # once per board: store its API token
+cd /path/to/a/repo
+kf init                        # reuses the stored token, maps columns, writes .mpx/kanbanflow.json
 ```
+
+`kf init` never asks for a token that is already stored. With several boards logged in it asks which
+one this repo belongs to; `--board <id|name>` answers that non-interactively.
 
 API tokens are **per board** and require a KanbanFlow premium plan; create one in the board's
 **Settings → API & Webhooks**.
@@ -61,7 +65,18 @@ Tokens are never written into a file in the repo. Resolution order:
 2. The OS credential store (Windows Credential Manager and equivalents, via `keyring`), keyed by
    board ID under the service `kanbanflow-cli`
 
-`kf auth login` stores a token; `kf auth status` shows which source this directory would use.
+`kf auth login` stores a token; `kf auth status` shows which source this directory would use and
+which boards are logged in.
+
+The credential store cannot be enumerated portably, so the board IDs to look tokens up by are kept
+in a **user-level registry** — `%APPDATA%\kanbanflow-cli\boards.json` on Windows,
+`$XDG_CONFIG_HOME/kanbanflow-cli/boards.json` or `~/.config/…` elsewhere. It holds board IDs and
+names, never a token, and losing it costs nothing but one re-login. `kf init` reads it to reuse a
+stored token in a repo that has no `.mpx/kanbanflow.json` yet.
+
+A pasted token is sanitized before use: surrounding whitespace is trimmed silently, and interior
+control codes, zero-width marks and BOMs are removed with a `note:` on stderr. Anything left that an
+HTTP header cannot carry is refused with exit 4 instead of reaching the API.
 
 ## `.mpx/kanbanflow.json`
 

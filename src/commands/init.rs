@@ -11,6 +11,7 @@ use anyhow::Context as _;
 use clap::Args;
 
 use crate::api::models::{Board, Column, User};
+use crate::boards;
 use crate::commands::auth;
 use crate::config::{CanonicalState, Config, StateColumns, CONFIG_RELATIVE_PATH};
 use crate::output::{self, Table};
@@ -34,6 +35,10 @@ pub struct InitArgs {
     /// 1-based index.
     #[arg(long = "map", value_name = "STATE=COLUMN")]
     pub maps: Vec<String>,
+    /// Use the stored token of this board (ID, name, or 1-based index from
+    /// `kf auth status`). Skips the question when several boards are logged in.
+    #[arg(long, value_name = "BOARD")]
+    pub board: Option<String>,
     /// The user ID (or full name / email) the token acts as.
     #[arg(long, value_name = "USER")]
     pub user: Option<String>,
@@ -69,6 +74,8 @@ pub fn run(args: InitArgs) -> anyhow::Result<()> {
     if !args.no_store && matches!(source, TokenSource::Argument | TokenSource::Prompt) {
         token::store(&board.id, &api_token)
             .with_context(|| format!("storing the token for board `{}`", board.id))?;
+        // Registering it here is what lets the next repo skip the token entirely.
+        auth::remember_board(&board.id, &board.name);
     }
 
     let users: Vec<User> = client
@@ -105,6 +112,10 @@ fn load_existing_config(target_path: &Path) -> Option<Config> {
 
 /// Order: environment variable, explicit argument, the existing board's stored
 /// token, then an interactive prompt.
+///
+/// Every human-supplied token goes through `auth::read_token`, which sanitizes
+/// it. Calling `auth::prompt_for_token` directly here used to skip that, so the
+/// prompt handed the trailing newline straight to the `Authorization` header.
 fn resolve_token(
     args: &InitArgs,
     existing: Option<&Config>,
@@ -121,7 +132,76 @@ fn resolve_token(
             return Ok((api_token, TokenSource::CredentialStore));
         }
     }
-    Ok((auth::prompt_for_token()?, TokenSource::Prompt))
+    if let Some(api_token) = token_from_registry(args.board.as_deref())? {
+        return Ok((api_token, TokenSource::CredentialStore));
+    }
+    let api_token = auth::read_token(None, false, None)?;
+    Ok((api_token, TokenSource::Prompt))
+}
+
+/// The stored token of a board `kf auth login` already handled, so a token is
+/// pasted once per board rather than once per repo.
+///
+/// `None` means "nothing usable here, go on and ask": an empty registry, or a
+/// board whose credential has since been deleted.
+fn token_from_registry(requested: Option<&str>) -> anyhow::Result<Option<String>> {
+    let registry = boards::load();
+    let board = match (requested, registry.boards.as_slice()) {
+        (Some(needle), []) => anyhow::bail!(
+            "`--board {needle}` was given, but no board is logged in yet. \
+             Run `kf auth login` first."
+        ),
+        (Some(needle), _) => registry.find(needle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no logged-in board matches `{needle}`. Logged in to: {}",
+                registry.describe()
+            )
+        })?,
+        (None, []) => return Ok(None),
+        (None, [only]) => only,
+        (None, many) => match choose_board(many)? {
+            Some(board) => board,
+            // The user asked to paste a token for a board that is not listed.
+            None => return Ok(None),
+        },
+    };
+
+    match token::resolve(&board.id) {
+        Ok(api_token) => {
+            eprintln!("Using the stored token for {board}.");
+            Ok(Some(api_token))
+        }
+        // The registry outlived the credential: say so and fall back to asking,
+        // rather than failing a command the user can still complete.
+        Err(error) => {
+            eprintln!("warning: {error}");
+            Ok(None)
+        }
+    }
+}
+
+/// Ask which logged-in board this repo belongs to. `None` when the user wants
+/// to paste a token for a board that is not in the registry yet.
+fn choose_board(candidates: &[boards::KnownBoard]) -> anyhow::Result<Option<&boards::KnownBoard>> {
+    require_terminal("--board <id|name>")?;
+    println!("Tokens are stored for these boards:");
+    for (index, board) in candidates.iter().enumerate() {
+        println!("  {}. {}", index + 1, board);
+    }
+    loop {
+        let answer = prompt(&format!(
+            "Board [1-{}, or `n` to paste a new token]: ",
+            candidates.len()
+        ))?;
+        let answer = answer.trim();
+        if answer.eq_ignore_ascii_case("n") {
+            return Ok(None);
+        }
+        if let Some(board) = boards::find(candidates, answer) {
+            return Ok(Some(board));
+        }
+        eprintln!("Not a valid choice; enter an index, a board name, an ID, or `n`.");
+    }
 }
 
 /// The API exposes no "who am I" endpoint: `GET /users` lists the board's

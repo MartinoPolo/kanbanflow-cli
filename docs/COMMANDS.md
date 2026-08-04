@@ -25,14 +25,19 @@ Card colors everywhere: `yellow`, `white`, `red`, `green`, `blue`, `purple`, `or
 Set up this repo: verify the token, map columns to canonical states, write `.mpx/kanbanflow.json`.
 `--json`: yes. Guarded: no.
 
+Token order: `KANBANFLOW_TOKEN`, `--token`/`--token-stdin`, the stored token of the board this repo
+is already wired to, the stored token of a logged-in board (`--board`, or a question when several
+are logged in), then a hidden prompt. A token is pasted once per board, not once per repo.
+
 ```
 kf init [OPTIONS]
 ```
 
 | Flag | Value | Effect | Default |
 | --- | --- | --- | --- |
-| `--token` | `TOKEN` | Use this API token. Lands in shell history — prefer `--token-stdin`. | prompt |
+| `--token` | `TOKEN` | Use this API token. Lands in shell history — prefer `--token-stdin`. | stored token, else prompt |
 | `--token-stdin` | — | Read the token as a single line from stdin. | off |
+| `--board` | `BOARD` | Use the stored token of this board (ID, name, or 1-based index from `kf auth status`). Skips the question when several boards are logged in. | one board: it; several: asks |
 | `--no-store` | — | Do not save the token in the OS credential store. | stores |
 | `--map` | `STATE=COLUMN` | Map a canonical state to a column; repeatable. Any use switches mapping to non-interactive mode and leaves unlisted states unmapped. `COLUMN` may be a name, a `uniqueId`, or a 1-based index. | interactive |
 | `--user` | `USER` | User ID, full name, or email the token acts as. | interactive |
@@ -49,7 +54,8 @@ kf init --map todo=To-do --map wip="In progress" --map done=Done --user U9kJ2b -
 
 ### auth login
 
-Store an API token for the board it belongs to. `--json`: no. Guarded: no.
+Store an API token for the board it belongs to, and record that board so `kf init` can reuse the
+token in any repo. Run once per board. `--json`: no. Guarded: no.
 
 ```
 kf auth login [OPTIONS]
@@ -67,7 +73,8 @@ printf '%s' "$KANBANFLOW_TOKEN" | kf auth login --token-stdin
 
 ### auth status
 
-Show which token source this directory would use. `--json`: yes. Guarded: no.
+Show which token source this directory would use, and which boards are logged in. Makes no HTTP
+request. `--json`: yes (adds `knownBoards`). Guarded: no.
 
 ```
 kf auth status [--json]
