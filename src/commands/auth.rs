@@ -13,14 +13,17 @@ use clap::{Args, Subcommand};
 use crate::api::models::Board;
 use crate::api::Client;
 use crate::boards;
-use crate::config::Config;
+use crate::config::{Config, CONFIG_RELATIVE_PATH};
 use crate::output;
+use crate::prompt::confirm;
 use crate::token;
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     /// Store an API token for the board it belongs to.
     Login(LoginArgs),
+    /// Delete a board's stored token.
+    Logout(LogoutArgs),
     /// Show which token source this directory would use.
     Status(StatusArgs),
 }
@@ -39,6 +42,20 @@ pub struct LoginArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct LogoutArgs {
+    /// The board to forget: an ID, a name, or a 1-based index from
+    /// `kf auth status`. Required when several boards are logged in.
+    #[arg(long, value_name = "BOARD")]
+    pub board: Option<String>,
+    /// Forget every logged-in board.
+    #[arg(long, conflicts_with = "board")]
+    pub all: bool,
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Print JSON instead of the human-readable output.
     #[arg(long)]
@@ -48,6 +65,7 @@ pub struct StatusArgs {
 pub fn run(command: AuthCommand) -> anyhow::Result<()> {
     match command {
         AuthCommand::Login(args) => login(args),
+        AuthCommand::Logout(args) => logout(args),
         AuthCommand::Status(args) => status(args),
     }
 }
@@ -72,6 +90,133 @@ fn login(args: LoginArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// A board `kf auth logout` will forget. The name is absent for a credential
+/// stored before the registry existed, which `--board <id>` can still target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogoutTarget {
+    id: String,
+    name: Option<String>,
+}
+
+impl LogoutTarget {
+    fn known(board: &boards::KnownBoard) -> Self {
+        Self {
+            id: board.id.clone(),
+            name: Some(board.name.clone()),
+        }
+    }
+}
+
+impl std::fmt::Display for LogoutTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.name {
+            Some(name) => write!(f, "{name} ({})", self.id),
+            None => write!(f, "{}", self.id),
+        }
+    }
+}
+
+fn logout(args: LogoutArgs) -> anyhow::Result<()> {
+    let registry = boards::load();
+    let targets = logout_targets(&args, &registry, stored_token_present)?;
+
+    let question = match targets.as_slice() {
+        [only] => format!("Remove the stored token for {only}?"),
+        many => format!(
+            "Remove the stored tokens for all {} logged-in boards ({})?",
+            many.len(),
+            describe_targets(many)
+        ),
+    };
+    if !args.yes && !confirm(&question)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    for target in &targets {
+        let had_token = stored_token_present(&target.id);
+        token::delete(&target.id)
+            .with_context(|| format!("deleting the stored token for board `{}`", target.id))?;
+        // The registry is only a lookup aid, so failing to update it must not
+        // mask the fact that the credential itself is gone.
+        if let Err(error) = boards::forget(&target.id) {
+            eprintln!("warning: could not update the board registry: {error}");
+        }
+        if had_token {
+            println!("Removed the stored token for {target}.");
+        } else {
+            println!("No stored token for {target}; forgot the board anyway.");
+        }
+    }
+
+    println!("`kf auth login` stores a token again; `{CONFIG_RELATIVE_PATH}` is left alone.");
+    if token::from_env().is_some() {
+        println!(
+            "Note: {} is still set, so commands keep authenticating with it.",
+            token::TOKEN_ENV_VAR
+        );
+    }
+    Ok(())
+}
+
+/// Which boards to forget. Ambiguity is refused rather than guessed: deleting
+/// the wrong credential costs a trip to the KanbanFlow settings page.
+///
+/// `credential_exists` is injected so the rules can be tested without touching
+/// the real credential store.
+fn logout_targets(
+    args: &LogoutArgs,
+    registry: &boards::Registry,
+    credential_exists: impl Fn(&str) -> bool,
+) -> anyhow::Result<Vec<LogoutTarget>> {
+    if args.all {
+        if registry.boards.is_empty() {
+            anyhow::bail!("no board is logged in, so there is nothing to forget");
+        }
+        return Ok(registry.boards.iter().map(LogoutTarget::known).collect());
+    }
+    match (args.board.as_deref(), registry.boards.as_slice()) {
+        (Some(needle), _) => {
+            if let Some(board) = registry.find(needle) {
+                return Ok(vec![LogoutTarget::known(board)]);
+            }
+            // A token stored before the registry existed is not listed anywhere,
+            // so an unlisted `--board` is taken as a raw board ID.
+            if credential_exists(needle) {
+                return Ok(vec![LogoutTarget {
+                    id: needle.to_string(),
+                    name: None,
+                }]);
+            }
+            anyhow::bail!(
+                "no logged-in board and no stored token matches `{needle}`.{}",
+                match registry.boards.is_empty() {
+                    true => String::new(),
+                    false => format!(" Logged in to: {}", registry.describe()),
+                }
+            )
+        }
+        (None, []) => anyhow::bail!(
+            "no board is logged in. Pass `--board <boardId>` to remove a token stored \
+             before the board registry existed."
+        ),
+        (None, [only]) => Ok(vec![LogoutTarget::known(only)]),
+        (None, many) => anyhow::bail!(
+            "{} boards are logged in ({}). Pass `--board <id|name>` or `--all`.",
+            many.len(),
+            registry.describe()
+        ),
+    }
+}
+
+fn describe_targets(targets: &[LogoutTarget]) -> String {
+    targets
+        .iter()
+        .map(LogoutTarget::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn status(args: StatusArgs) -> anyhow::Result<()> {
@@ -108,10 +253,7 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
     println!("Token source: {source}");
     match &config {
         Some(config) => println!("Board:        {} ({})", config.board_name, config.board_id),
-        None => println!(
-            "Board:        unknown (no `{}`)",
-            crate::config::CONFIG_RELATIVE_PATH
-        ),
+        None => println!("Board:        unknown (no `{CONFIG_RELATIVE_PATH}`)"),
     }
     if registry.boards.is_empty() {
         println!("Logged in to: no board yet");
@@ -240,6 +382,86 @@ mod tests {
     #[test]
     fn read_token_rejects_a_blank_flag_value() {
         assert!(read_token(Some("   ".to_string()), false, None).is_err());
+    }
+
+    fn logout_args(board: Option<&str>, all: bool) -> LogoutArgs {
+        LogoutArgs {
+            board: board.map(str::to_string),
+            all,
+            yes: true,
+        }
+    }
+
+    fn registry(boards: &[(&str, &str)]) -> boards::Registry {
+        boards::Registry {
+            boards: boards
+                .iter()
+                .map(|(id, name)| boards::KnownBoard {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn no_credentials(_board_id: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn logout_takes_the_only_logged_in_board_without_asking() {
+        let targets = logout_targets(
+            &logout_args(None, false),
+            &registry(&[("jZqpF4H", "Team E")]),
+            no_credentials,
+        )
+        .expect("one board is unambiguous");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].to_string(), "Team E (jZqpF4H)");
+    }
+
+    /// Deleting the wrong credential means a trip to the KanbanFlow settings
+    /// page, so several boards and no `--board` is refused rather than guessed.
+    #[test]
+    fn logout_refuses_to_choose_between_several_boards() {
+        let registry = registry(&[("jZqpF4H", "Team E"), ("F2QMK1B", "My first board")]);
+        let error = logout_targets(&logout_args(None, false), &registry, no_credentials)
+            .expect_err("ambiguous");
+        assert!(error.to_string().contains("--all"), "{error}");
+
+        let targets = logout_targets(&logout_args(None, true), &registry, no_credentials)
+            .expect("--all covers both");
+        assert_eq!(targets.len(), 2);
+
+        let targets = logout_targets(
+            &logout_args(Some("team e"), false),
+            &registry,
+            no_credentials,
+        )
+        .expect("matched by name");
+        assert_eq!(targets[0].id, "jZqpF4H");
+    }
+
+    /// Tokens stored before the registry existed are listed nowhere, so a raw
+    /// board ID has to reach the credential store.
+    #[test]
+    fn logout_accepts_a_board_id_that_is_not_in_the_registry() {
+        let targets = logout_targets(
+            &logout_args(Some("F2QMK1B"), false),
+            &registry(&[]),
+            |board_id| board_id == "F2QMK1B",
+        )
+        .expect("the credential store has it");
+        assert_eq!(targets[0].name, None);
+        assert_eq!(targets[0].to_string(), "F2QMK1B");
+
+        assert!(logout_targets(
+            &logout_args(Some("F2QMK1B"), false),
+            &registry(&[]),
+            no_credentials
+        )
+        .is_err());
+        assert!(logout_targets(&logout_args(None, true), &registry(&[]), no_credentials).is_err());
     }
 
     #[test]

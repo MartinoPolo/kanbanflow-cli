@@ -6,7 +6,7 @@ Every command, every flag, as the binary reports it. Grammar: `kf <noun> <verb> 
 mutate a task someone else is responsible for and exit `3` until `--force` is passed.
 
 - [init](#init)
-- [auth](#auth) — [login](#auth-login), [status](#auth-status)
+- [auth](#auth) — [login](#auth-login), [logout](#auth-logout), [status](#auth-status)
 - [task](#task) — [create](#task-create), [view](#task-view), [list](#task-list), [edit](#task-edit), [move](#task-move), [delete](#task-delete), [grab](#task-grab), [finish](#task-finish)
 - [attach](#attach) — [add](#attach-add), [list](#attach-list), [download](#attach-download), [delete](#attach-delete)
 - [comment](#comment) — [add](#comment-add), [list](#comment-list), [edit](#comment-edit), [delete](#comment-delete)
@@ -69,6 +69,29 @@ kf auth login [OPTIONS]
 
 ```bash
 printf '%s' "$KANBANFLOW_TOKEN" | kf auth login --token-stdin
+```
+
+### auth logout
+
+Delete a board's stored token and drop it from the board registry. `.mpx/kanbanflow.json` is left
+alone, so `kf auth login` restores access. `--json`: no. Guarded: no.
+
+```
+kf auth logout [OPTIONS]
+```
+
+| Flag | Value | Effect | Default |
+| --- | --- | --- | --- |
+| `--board` | `BOARD` | The board to forget: ID, name, or 1-based index from `kf auth status`. A raw board ID also works for a token stored before the registry existed. | one board: it; several: refuses |
+| `--all` | — | Forget every logged-in board. Conflicts with `--board`. | off |
+| `--yes` | — | Skip the confirmation prompt. | asks |
+
+With several boards logged in and no `--board`, the command refuses rather than guessing which
+credential to delete. Forgetting a board that has no stored token is not an error — the registry
+entry is removed either way.
+
+```bash
+kf auth logout --board "Team E" --yes
 ```
 
 ### auth status

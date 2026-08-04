@@ -65,8 +65,8 @@ Tokens are never written into a file in the repo. Resolution order:
 2. The OS credential store (Windows Credential Manager and equivalents, via `keyring`), keyed by
    board ID under the service `kanbanflow-cli`
 
-`kf auth login` stores a token; `kf auth status` shows which source this directory would use and
-which boards are logged in.
+`kf auth login` stores a token; `kf auth logout` deletes one; `kf auth status` shows which source
+this directory would use and which boards are logged in.
 
 The credential store cannot be enumerated portably, so the board IDs to look tokens up by are kept
 in a **user-level registry** — `%APPDATA%\kanbanflow-cli\boards.json` on Windows,

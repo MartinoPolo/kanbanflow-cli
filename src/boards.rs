@@ -53,6 +53,14 @@ impl Registry {
         }
     }
 
+    /// Drop a board. Returns whether it was listed, so a caller can tell
+    /// "forgotten" from "was never there".
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.boards.len();
+        self.boards.retain(|board| board.id != id);
+        before != self.boards.len()
+    }
+
     /// Match a board by ID, name (case-insensitive) or 1-based index — the same
     /// references `--map` and `--user` accept.
     pub fn find(&self, needle: &str) -> Option<&KnownBoard> {
@@ -131,20 +139,40 @@ pub fn load_from(path: &Path) -> Option<Registry> {
     serde_json::from_str(&text).ok()
 }
 
+/// The registry path, as an error rather than an `Option`, for the two
+/// functions that have to write it.
+fn writable_path() -> std::io::Result<PathBuf> {
+    path().ok_or_else(|| {
+        std::io::Error::other(
+            "no per-user configuration directory (APPDATA, XDG_CONFIG_HOME or HOME)",
+        )
+    })
+}
+
 /// Record a board whose token is in the credential store. Failing to write is
 /// reported to the caller, which warns — the token is already stored, so the
 /// command itself has succeeded.
 pub fn remember(id: &str, name: &str) -> std::io::Result<()> {
-    let path = path().ok_or_else(|| {
-        std::io::Error::other(
-            "no per-user configuration directory (APPDATA, XDG_CONFIG_HOME or HOME)",
-        )
-    })?;
+    let path = writable_path()?;
     let mut registry = load_from(&path).unwrap_or_default();
     if registry.upsert(id, name) {
         registry.save_to(&path)?;
     }
     Ok(())
+}
+
+/// Drop a board from the registry, after its token has been deleted. Returns
+/// whether the board was listed at all.
+pub fn forget(id: &str) -> std::io::Result<bool> {
+    let path = writable_path()?;
+    let Some(mut registry) = load_from(&path) else {
+        return Ok(false);
+    };
+    if !registry.remove(id) {
+        return Ok(false);
+    }
+    registry.save_to(&path)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -177,6 +205,15 @@ mod tests {
 
         assert!(registry.upsert("B3new", "Third"), "new board");
         assert_eq!(registry.boards.len(), 3);
+    }
+
+    #[test]
+    fn remove_drops_a_listed_board_and_reports_a_miss() {
+        let mut registry = registry();
+        assert!(registry.remove("jZqpF4H"));
+        assert_eq!(registry.boards.len(), 1);
+        assert_eq!(registry.boards[0].id, "F2QMK1B");
+        assert!(!registry.remove("jZqpF4H"), "already gone");
     }
 
     #[test]
