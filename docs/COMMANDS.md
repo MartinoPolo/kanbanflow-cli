@@ -169,16 +169,16 @@ kf task list [OPTIONS]
 | --- | --- | --- | --- |
 | `--state` | state | Only tasks in this canonical state; repeatable, and several states select the union of their columns. | all |
 | `--column` | `NAME_OR_ID` | Only tasks in this column, by name or ID — for columns with no canonical state. | all |
-| `--active` | — | Only unfinished work: every column except those mapped to `done` and `archive`. | all |
+| `--open` | — | Only unfinished work: every column except those mapped to `done` and `archive`. | all |
 | `--mine` | — | Only tasks you are responsible for **or** a collaborator on. | all |
 | `--json` | — | Print JSON instead of the human-readable output. | human |
 
-`--state`, `--column` and `--active` are mutually exclusive.
+`--state`, `--column` and `--open` are mutually exclusive.
 
 State names are matched case-insensitively. A state with no column mapped in
 `.mpx/kanbanflow.json` is an error (exit 7), not an empty result.
 
-`--active` filters by **exclusion**, which is what makes it board-agnostic: it drops the `done`
+`--open` filters by **exclusion**, which is what makes it board-agnostic: it drops the `done`
 and `archive` columns and keeps everything else, including lanes the board invented that map to no
 canonical state (a "Do today", a "Blocked"). Listing the open states by hand instead would silently
 miss those. It needs at least one of `done` / `archive` mapped — with neither, there is nowhere for
@@ -194,7 +194,7 @@ by the responsible user alone.
 The `STATE` column prints the canonical state, or the column's name when it has none.
 
 ```bash
-kf task list --active --mine                   # everything of mine that is not finished
+kf task list --open --mine                     # everything of mine that is not finished
 kf task list --state todo --state wip --mine   # the same, restricted to two named states
 kf task list --state wip --mine
 ```

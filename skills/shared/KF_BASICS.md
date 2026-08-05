@@ -24,7 +24,7 @@ Shared contract for every `kf-` skill. `kf` is the KanbanFlow CLI (`gh`-style gr
 | Responsible user | The single assignee. `kf task create` assigns you unless `--responsible none`. |
 | Collaborator | An extra person on the task; the board draws their avatar too. Counts as "mine" for `kf task list --mine` and for the guardrail. |
 | Mine | Responsible user **or** collaborator. The one exception is `kf task grab`, which reassigns the responsible user and so needs `--force` to take a task off a teammate. |
-| Active | Every column except `done` and `archive` — `kf task list --active`. Includes board-specific lanes with no canonical state. |
+| Open | Every column except `done` and `archive` — `kf task list --open`. Includes board-specific lanes with no canonical state. |
 
 Say "task", never "issue" or "card".
 

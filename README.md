@@ -40,7 +40,7 @@ API tokens are **per board** and require a KanbanFlow premium plan; create one i
 | --- | --- |
 | `kf init` | Map the board's columns to canonical states and write `.mpx/kanbanflow.json` |
 | `kf auth login` | Store the board's API token in the OS credential store |
-| `kf task list --active --mine` | List tasks, filtered by state/column (`--state` repeats) or `--active` (everything but `done`/`archive`), and by ownership — `--mine` covers tasks you are responsible for **or** collaborate on |
+| `kf task list --open --mine` | List tasks, filtered by state/column (`--state` repeats) or `--open` (everything but `done`/`archive`), and by ownership — `--mine` covers tasks you are responsible for **or** collaborate on |
 | `kf task view E613 --download-attachments DIR` | Task + comments + attachments in one view, files saved locally |
 | `kf task create --name ...` | Create a task; assigned to you unless `--responsible none` |
 | `kf task grab E613` | Assign to yourself, move to `wip`, print the view |

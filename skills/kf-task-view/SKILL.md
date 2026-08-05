@@ -35,7 +35,7 @@ reuse the JSON. Never poll for changes.
 - Use a scratch directory (`.mpx/tmp/<ref>/`), never the repo tree.
 - Omit `--download-attachments` only when a prior aggregate already showed zero attachments.
 
-If you need to find the reference first: `kf task list --active --mine --json` for everything of
+If you need to find the reference first: `kf task list --open --mine --json` for everything of
 yours still open, or `--state wip --mine --json` for one state (`--state` repeats). That is a
 full board scan — do it once, not per task.
 

@@ -131,9 +131,9 @@ pub struct ListArgs {
     /// Only tasks in this column, by name or ID (for columns with no canonical state).
     #[arg(long, value_name = "NAME_OR_ID", conflicts_with = "state")]
     pub column: Option<String>,
-    /// Only unfinished work: every column except the ones mapped to `done` and `archive`.
+    /// Only open work: every column except the ones mapped to `done` and `archive`.
     #[arg(long, conflicts_with_all = ["state", "column"])]
-    pub active: bool,
+    pub open: bool,
     /// Only tasks you are responsible for or a collaborator on.
     #[arg(long)]
     pub mine: bool,
@@ -542,14 +542,14 @@ fn describe_people(task: &Task, users: &mut UserNames<'_>) -> String {
 }
 
 /// Which columns a `task list` run keeps. The variants are mutually exclusive on
-/// the command line, so exactly one of `--state`, `--column` and `--active` decides.
+/// the command line, so exactly one of `--state`, `--column` and `--open` decides.
 #[derive(Debug, PartialEq, Eq)]
 enum ColumnFilter<'a> {
     /// No filter: the whole board.
     Every,
     /// `--state`, one entry per state — several states select the union.
     OnlyThese(Vec<&'a str>),
-    /// `--active`: everything but the closed columns.
+    /// `--open`: everything but the closed columns.
     AllButThese(Vec<&'a str>),
     /// `--column`, matched against a column's ID or its name.
     NamedOrIdentified(&'a str),
@@ -574,7 +574,7 @@ fn column_filter<'a>(
     args: &'a ListArgs,
     config: &'a Config,
 ) -> Result<ColumnFilter<'a>, ConfigError> {
-    if args.active {
+    if args.open {
         return Ok(ColumnFilter::AllButThese(config.closed_column_ids()?));
     }
     if !args.state.is_empty() {
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     /// A board with a lane that maps to no canonical state, because that is the
-    /// case `--active` has to decide about.
+    /// case `--open` has to decide about.
     fn board() -> Vec<TaskGroup> {
         serde_json::from_str(
             r#"[{"columnId":"CTODO","columnName":"To-do","tasks":[]},
@@ -1079,11 +1079,11 @@ mod tests {
         }
     }
 
-    fn list_args(states: &[CanonicalState], column: Option<&str>, active: bool) -> ListArgs {
+    fn list_args(states: &[CanonicalState], column: Option<&str>, open: bool) -> ListArgs {
         ListArgs {
             state: states.to_vec(),
             column: column.map(str::to_string),
-            active,
+            open,
             mine: false,
             json: false,
         }
@@ -1118,10 +1118,10 @@ mod tests {
         ));
     }
 
-    /// `--active` filters by exclusion, so a lane the board invented — "Do today" —
+    /// `--open` filters by exclusion, so a lane the board invented — "Do today" —
     /// stays in the answer instead of being dropped for having no canonical state.
     #[test]
-    fn active_drops_only_the_closed_columns() {
+    fn open_drops_only_the_closed_columns() {
         let args = list_args(&[], None, true);
         assert_eq!(
             kept_columns(&board(), &args).expect("done is mapped"),
@@ -1130,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn active_needs_somewhere_for_work_to_end() {
+    fn open_needs_somewhere_for_work_to_end() {
         let groups = board();
         let mut config = board_config();
         config.states.set(CanonicalState::Done, None);
