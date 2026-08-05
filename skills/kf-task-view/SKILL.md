@@ -35,7 +35,8 @@ reuse the JSON. Never poll for changes.
 - Use a scratch directory (`.mpx/tmp/<ref>/`), never the repo tree.
 - Omit `--download-attachments` only when a prior aggregate already showed zero attachments.
 
-If you need to find the reference first: `kf task list --state wip --mine --json`. That is a
+If you need to find the reference first: `kf task list --active --mine --json` for everything of
+yours still open, or `--state wip --mine --json` for one state (`--state` repeats). That is a
 full board scan — do it once, not per task.
 
 ## Step 2: Read the images
@@ -50,7 +51,8 @@ content, not decoration.
 | --- | --- |
 | `task.number` | The human reference, `{prefix, value}` → `E613`. |
 | `task.columnId` | Workflow state. Map through `.mpx/kanbanflow.json`; human output prints the canonical state directly. |
-| `task.responsibleUserId` | Owner. Not your user ID → the task is a teammate's; mutations will be refused (exit 3). |
+| `task.responsibleUserId` | Assignee. Neither this nor `collaborators[]` is your user ID → the task is a teammate's; mutations will be refused (exit 3). |
+| `task.collaborators[].userId` | Extra people. Your ID here makes the task yours to mutate, but `kf task grab` still needs `--force` to take it off the responsible user. |
 | `task.color` | `red` = bug/critical, `green` = normal (work convention). |
 | `task.labels[].name` | Area/project. Tells you which part of the codebase to look at. |
 | `task.subTasks[]` | Checklist, `{name, finished}`, addressed by 1-based position. Unfinished items are the remaining work. |

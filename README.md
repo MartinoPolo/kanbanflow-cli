@@ -40,7 +40,7 @@ API tokens are **per board** and require a KanbanFlow premium plan; create one i
 | --- | --- |
 | `kf init` | Map the board's columns to canonical states and write `.mpx/kanbanflow.json` |
 | `kf auth login` | Store the board's API token in the OS credential store |
-| `kf task list --state wip --mine` | List tasks, filtered by state/column and ownership |
+| `kf task list --active --mine` | List tasks, filtered by state/column (`--state` repeats) or `--active` (everything but `done`/`archive`), and by ownership — `--mine` covers tasks you are responsible for **or** collaborate on |
 | `kf task view E613 --download-attachments DIR` | Task + comments + attachments in one view, files saved locally |
 | `kf task create --name ...` | Create a task; assigned to you unless `--responsible none` |
 | `kf task grab E613` | Assign to yourself, move to `wip`, print the view |
@@ -112,9 +112,11 @@ mutation echoes the affected task as `NUMBER (TASK_ID)`. Errors go to stderr pre
 | 6 | Rate limited (1000 requests/hour/board); back off |
 | 7 | No usable `.mpx/kanbanflow.json`; run `kf init` |
 
-**Guardrail.** Tasks you create are yours by default, so the normal loop never trips it. Mutating a
-task that is unassigned or belongs to a teammate is refused (exit 3) — take it with `kf task grab`
-or override with `--force`. `kf comment add` is exempt. Labels are never created implicitly:
+**Guardrail.** Tasks you create are yours by default, so the normal loop never trips it. A task is
+yours when you are its responsible user or one of its collaborators; mutating one that is nobody's
+or a teammate's is refused (exit 3) — take it with `kf task grab` or override with `--force`.
+`kf comment add` is exempt, and `kf task grab` is the one command judged on the responsible user
+alone, since it reassigns that field. Labels are never created implicitly:
 `--label` / `--add-label` accept only names already on the board, matched case-insensitively.
 
 Date-grouped columns (a work-board "Done" is one) hand out only their first 20 tasks per cell. `kf`

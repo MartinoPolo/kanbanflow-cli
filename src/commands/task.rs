@@ -4,7 +4,7 @@
 //! the API forces multi-call dances: a full task read is task + comments +
 //! attachments, and attachment links expire ~24h after they are handed out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -16,10 +16,10 @@ use crate::api::models::{
     Label, SubTask, SubTaskPayload, Task, TaskGroup, UpdateTask,
 };
 use crate::api::{ApiError, Client};
-use crate::config::{CanonicalState, Config};
+use crate::config::{CanonicalState, Config, ConfigError};
 use crate::context::Context;
 use crate::files::unique_destination;
-use crate::guard::{self, GuardError};
+use crate::guard;
 use crate::labels;
 use crate::output::{self, Table};
 use crate::prompt::confirm;
@@ -89,10 +89,10 @@ pub struct CreateArgs {
     #[arg(long)]
     pub description: Option<String>,
     /// Card color.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub color: Option<CardColor>,
     /// Canonical state (column) to create the task in.
-    #[arg(long, value_enum, default_value_t = CanonicalState::Todo)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = CanonicalState::Todo)]
     pub to: CanonicalState,
     /// Existing board label to apply; repeatable. Unknown labels are refused.
     #[arg(long = "label", value_name = "NAME")]
@@ -125,13 +125,16 @@ pub struct ViewArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Only tasks in this canonical state.
-    #[arg(long, value_enum)]
-    pub state: Option<CanonicalState>,
+    /// Only tasks in this canonical state; repeatable (`--state todo --state wip`).
+    #[arg(long, value_enum, ignore_case = true)]
+    pub state: Vec<CanonicalState>,
     /// Only tasks in this column, by name or ID (for columns with no canonical state).
     #[arg(long, value_name = "NAME_OR_ID", conflicts_with = "state")]
     pub column: Option<String>,
-    /// Only tasks you are responsible for.
+    /// Only unfinished work: every column except the ones mapped to `done` and `archive`.
+    #[arg(long, conflicts_with_all = ["state", "column"])]
+    pub active: bool,
+    /// Only tasks you are responsible for or a collaborator on.
     #[arg(long)]
     pub mine: bool,
     /// Print JSON instead of the human-readable output.
@@ -153,7 +156,7 @@ pub struct EditArgs {
     #[arg(long, value_name = "TEXT")]
     pub append_description: Option<String>,
     /// Card color.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub color: Option<CardColor>,
     /// Add an existing board label; repeatable.
     #[arg(long = "add-label", value_name = "NAME")]
@@ -177,7 +180,7 @@ pub struct MoveArgs {
     /// Task number (`E613`) or task ID.
     pub task: String,
     /// Target canonical state.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub to: CanonicalState,
     /// Grouping date (`YYYY-MM-DD`) when the target column is date grouped.
     /// Omitted, the server files the task under today's UTC date.
@@ -223,7 +226,7 @@ pub struct FinishArgs {
     #[arg(long, value_name = "PATH")]
     pub comment_file: Option<PathBuf>,
     /// Target canonical state.
-    #[arg(long, value_enum, default_value_t = CanonicalState::Done)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = CanonicalState::Done)]
     pub to: CanonicalState,
     /// Mark every unfinished subtask finished.
     #[arg(long)]
@@ -396,22 +399,35 @@ fn view(context: &Context, args: ViewArgs) -> anyhow::Result<()> {
 fn print_aggregate(aggregate: &TaskAggregate, config: &Config, users: &mut UserNames<'_>) {
     let task = &aggregate.task;
     println!("{}  {}", task.reference(), task.name);
-    println!("State:        {}", describe_column(config, &task.column_id));
+    println!(
+        "State:         {}",
+        describe_column(config, &task.column_id)
+    );
     if let Some(color) = &task.color {
-        println!("Color:        {color}");
+        println!("Color:         {color}");
     }
     println!(
-        "Responsible:  {}",
+        "Responsible:   {}",
         match task.responsible_user_id.as_deref() {
             Some(user_id) => users.display(user_id),
             None => "unassigned".to_string(),
         }
     );
+    if !task.collaborators.is_empty() {
+        println!(
+            "Collaborators: {}",
+            task.collaborators
+                .iter()
+                .map(|collaborator| users.display(&collaborator.user_id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if let Some(date) = &task.grouping_date {
-        println!("Grouped:      {date}");
+        println!("Grouped:       {date}");
     }
     if !task.labels.is_empty() {
-        println!("Labels:       {}", join_labels(&task.labels));
+        println!("Labels:        {}", join_labels(&task.labels));
     }
 
     if let Some(description) = task.description.as_deref().map(str::trim) {
@@ -508,26 +524,85 @@ fn extension_of(name: &str) -> Option<String> {
 // list
 // ---------------------------------------------------------------------------
 
+/// The `PEOPLE` cell: the responsible user, then collaborators marked with `+`.
+fn describe_people(task: &Task, users: &mut UserNames<'_>) -> String {
+    let responsible = task
+        .responsible_user_id
+        .as_deref()
+        .map(|user_id| users.display(user_id));
+    let collaborators = task
+        .collaborators
+        .iter()
+        .map(|collaborator| format!("+{}", users.display(&collaborator.user_id)));
+    responsible
+        .into_iter()
+        .chain(collaborators)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Which columns a `task list` run keeps. The variants are mutually exclusive on
+/// the command line, so exactly one of `--state`, `--column` and `--active` decides.
+#[derive(Debug, PartialEq, Eq)]
+enum ColumnFilter<'a> {
+    /// No filter: the whole board.
+    Every,
+    /// `--state`, one entry per state — several states select the union.
+    OnlyThese(Vec<&'a str>),
+    /// `--active`: everything but the closed columns.
+    AllButThese(Vec<&'a str>),
+    /// `--column`, matched against a column's ID or its name.
+    NamedOrIdentified(&'a str),
+}
+
+impl ColumnFilter<'_> {
+    fn keeps(&self, group: &TaskGroup) -> bool {
+        match self {
+            ColumnFilter::Every => true,
+            ColumnFilter::OnlyThese(columns) => columns.contains(&group.column_id.as_str()),
+            ColumnFilter::AllButThese(columns) => !columns.contains(&group.column_id.as_str()),
+            ColumnFilter::NamedOrIdentified(needle) => {
+                group.column_id == *needle || group.column_name.eq_ignore_ascii_case(needle)
+            }
+        }
+    }
+}
+
+/// An unmapped state is an error rather than an empty slice: silently dropping it
+/// would under-report the board without saying so.
+fn column_filter<'a>(
+    args: &'a ListArgs,
+    config: &'a Config,
+) -> Result<ColumnFilter<'a>, ConfigError> {
+    if args.active {
+        return Ok(ColumnFilter::AllButThese(config.closed_column_ids()?));
+    }
+    if !args.state.is_empty() {
+        let columns = args
+            .state
+            .iter()
+            .map(|state| config.column_id(*state))
+            .collect::<Result<_, _>>()?;
+        return Ok(ColumnFilter::OnlyThese(columns));
+    }
+    Ok(match args.column.as_deref() {
+        Some(needle) => ColumnFilter::NamedOrIdentified(needle),
+        None => ColumnFilter::Every,
+    })
+}
+
+fn select_groups<'a>(groups: &'a [TaskGroup], filter: &ColumnFilter<'_>) -> Vec<&'a TaskGroup> {
+    groups.iter().filter(|group| filter.keeps(group)).collect()
+}
+
 fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     // Paged, not raw: a silently truncated Done column would make `list` lie
     // about what is on the board.
     let groups: Vec<TaskGroup> =
         tasks::fetch_all_groups(&context.client).context("listing the board's tasks")?;
 
-    let wanted_column = match args.state {
-        Some(state) => Some(context.config.column_id(state)?.to_string()),
-        None => None,
-    };
-    let selected: Vec<&TaskGroup> = groups
-        .iter()
-        .filter(|group| match (&wanted_column, &args.column) {
-            (Some(column_id), _) => &group.column_id == column_id,
-            (None, Some(needle)) => {
-                group.column_id == *needle || group.column_name.eq_ignore_ascii_case(needle)
-            }
-            (None, None) => true,
-        })
-        .collect();
+    let filter = column_filter(&args, &context.config)?;
+    let selected = select_groups(&groups, &filter);
 
     if let Some(needle) = &args.column {
         if selected.is_empty() {
@@ -545,9 +620,7 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     let tasks: Vec<&Task> = selected
         .iter()
         .flat_map(|group| group.tasks.iter())
-        .filter(|task| {
-            !args.mine || task.responsible_user_id.as_deref() == Some(context.my_user_id())
-        })
+        .filter(|task| !args.mine || guard::is_mine(task, context.my_user_id()))
         .collect();
 
     if args.json {
@@ -555,16 +628,25 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     }
 
     let mut users = UserNames::new(&context.client, context.my_user_id());
-    let mut table = Table::new(&["NUMBER", "STATE", "NAME", "RESPONSIBLE", "LABELS"]);
+    let mut table = Table::new(&["NUMBER", "STATE", "NAME", "PEOPLE", "LABELS"]);
+    // A column with no canonical state still has a name in the listing response,
+    // which beats printing its raw ID.
+    let column_names: HashMap<&str, &str> = groups
+        .iter()
+        .map(|group| (group.column_id.as_str(), group.column_name.as_str()))
+        .collect();
     for task in &tasks {
         table.row([
             task.reference(),
-            describe_column(&context.config, &task.column_id),
+            match context.config.state_for_column(&task.column_id) {
+                Some(state) => state.to_string(),
+                None => column_names
+                    .get(task.column_id.as_str())
+                    .map(|name| (*name).to_string())
+                    .unwrap_or_else(|| task.column_id.clone()),
+            },
             output::truncate_cell(&task.name, 60),
-            task.responsible_user_id
-                .as_deref()
-                .map(|user_id| users.display(user_id))
-                .unwrap_or_default(),
+            describe_people(task, &mut users),
             join_labels(&task.labels),
         ]);
     }
@@ -738,7 +820,7 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
 
 fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
     let mut task = resolve::resolve_task_named(&context.client, &args.task)?;
-    ensure_can_grab(&task, context.my_user_id(), args.force)
+    guard::ensure_can_take_over(&task, context.my_user_id(), args.force)
         .with_context(|| format!("grabbing task {}", task.reference()))?;
     let column_id = context.config.column_id(CanonicalState::Wip)?.to_string();
 
@@ -779,15 +861,6 @@ fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
     let mut users = UserNames::new(&context.client, context.my_user_id());
     print_aggregate(&aggregate, &context.config, &mut users);
     Ok(())
-}
-
-/// Grabbing assigns the task to us, so an unassigned task is fair game; only a
-/// teammate's task needs `--force`.
-fn ensure_can_grab(task: &Task, my_user_id: &str, force: bool) -> Result<(), GuardError> {
-    match task.responsible_user_id.as_deref() {
-        Some(owner) if owner != my_user_id => guard::ensure_can_mutate(task, my_user_id, force),
-        _ => Ok(()),
-    }
 }
 
 /// `finish` writes in three steps and the API has no transaction, so a failure
@@ -967,6 +1040,7 @@ fn is_iso_date(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::StateColumns;
 
     fn labels(names: &[&str]) -> Vec<Label> {
         names
@@ -976,6 +1050,117 @@ mod tests {
                 pinned: None,
             })
             .collect()
+    }
+
+    /// A board with a lane that maps to no canonical state, because that is the
+    /// case `--active` has to decide about.
+    fn board() -> Vec<TaskGroup> {
+        serde_json::from_str(
+            r#"[{"columnId":"CTODO","columnName":"To-do","tasks":[]},
+                {"columnId":"CWIP","columnName":"In progress","tasks":[]},
+                {"columnId":"CTODAY","columnName":"Do today","tasks":[]},
+                {"columnId":"CDONE","columnName":"Done","tasks":[]}]"#,
+        )
+        .expect("fixture parses")
+    }
+
+    fn board_config() -> Config {
+        Config {
+            board_id: "F2QMK1B".to_string(),
+            board_name: "My first board".to_string(),
+            user_id: "VrvR3H".to_string(),
+            states: StateColumns {
+                todo: Some("CTODO".to_string()),
+                wip: Some("CWIP".to_string()),
+                review: None,
+                done: Some("CDONE".to_string()),
+                archive: None,
+            },
+        }
+    }
+
+    fn list_args(states: &[CanonicalState], column: Option<&str>, active: bool) -> ListArgs {
+        ListArgs {
+            state: states.to_vec(),
+            column: column.map(str::to_string),
+            active,
+            mine: false,
+            json: false,
+        }
+    }
+
+    fn kept_columns(groups: &[TaskGroup], args: &ListArgs) -> Result<Vec<String>, ConfigError> {
+        let config = board_config();
+        let filter = column_filter(args, &config)?;
+        Ok(select_groups(groups, &filter)
+            .iter()
+            .map(|group| group.column_name.clone())
+            .collect())
+    }
+
+    #[test]
+    fn several_states_select_the_union_of_their_columns() {
+        let args = list_args(&[CanonicalState::Todo, CanonicalState::Wip], None, false);
+        assert_eq!(
+            kept_columns(&board(), &args).expect("both states are mapped"),
+            ["To-do", "In progress"]
+        );
+    }
+
+    #[test]
+    fn a_state_with_no_column_is_an_error_not_an_empty_result() {
+        let args = list_args(&[CanonicalState::Review], None, false);
+        assert!(matches!(
+            kept_columns(&board(), &args),
+            Err(ConfigError::UnmappedState {
+                state: CanonicalState::Review
+            })
+        ));
+    }
+
+    /// `--active` filters by exclusion, so a lane the board invented — "Do today" —
+    /// stays in the answer instead of being dropped for having no canonical state.
+    #[test]
+    fn active_drops_only_the_closed_columns() {
+        let args = list_args(&[], None, true);
+        assert_eq!(
+            kept_columns(&board(), &args).expect("done is mapped"),
+            ["To-do", "In progress", "Do today"]
+        );
+    }
+
+    #[test]
+    fn active_needs_somewhere_for_work_to_end() {
+        let groups = board();
+        let mut config = board_config();
+        config.states.set(CanonicalState::Done, None);
+        let args = list_args(&[], None, true);
+        assert!(matches!(
+            column_filter(&args, &config),
+            Err(ConfigError::NoClosedState)
+        ));
+        assert_eq!(
+            select_groups(&groups, &ColumnFilter::AllButThese(vec!["CDONE"])).len(),
+            groups.len() - 1
+        );
+    }
+
+    #[test]
+    fn no_filter_keeps_the_whole_board_and_a_column_name_matches_case_insensitively() {
+        let groups = board();
+        assert_eq!(
+            kept_columns(&groups, &list_args(&[], None, false)).expect("no filter"),
+            ["To-do", "In progress", "Do today", "Done"]
+        );
+        assert_eq!(
+            kept_columns(&groups, &list_args(&[], Some("in PROGRESS"), false)).expect("by name"),
+            ["In progress"]
+        );
+        assert!(
+            kept_columns(&groups, &list_args(&[], Some("Backlog"), false))
+                .expect("unknown name")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1121,17 +1306,5 @@ mod tests {
             .landed(),
             "0/2 subtasks WERE checked"
         );
-    }
-
-    #[test]
-    fn grab_only_needs_force_for_someone_elses_task() {
-        let mut task: Task =
-            serde_json::from_str(r#"{"_id":"T1","name":"n","columnId":"C1"}"#).expect("parses");
-        assert!(ensure_can_grab(&task, "UME", false).is_ok());
-        task.responsible_user_id = Some("UME".to_string());
-        assert!(ensure_can_grab(&task, "UME", false).is_ok());
-        task.responsible_user_id = Some("UOTHER".to_string());
-        assert!(ensure_can_grab(&task, "UME", false).is_err());
-        assert!(ensure_can_grab(&task, "UME", true).is_ok());
     }
 }

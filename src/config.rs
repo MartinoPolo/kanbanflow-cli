@@ -36,6 +36,11 @@ pub enum ConfigError {
     },
     #[error("No column is mapped to the `{state}` state in `{CONFIG_RELATIVE_PATH}`. Re-run `kf init` to map it.")]
     UnmappedState { state: CanonicalState },
+    #[error(
+        "`--active` needs to know where work ends, but `{CONFIG_RELATIVE_PATH}` maps no column to \
+         `done` or `archive`. Re-run `kf init` to map one."
+    )]
+    NoClosedState,
 }
 
 /// Board-agnostic workflow states; `kf init` maps each to a real column ID.
@@ -58,6 +63,10 @@ impl CanonicalState {
         CanonicalState::Done,
         CanonicalState::Archive,
     ];
+
+    /// The states where work has ended. Everything else — including a column with
+    /// no canonical state at all, like a board's own "Do today" — is active work.
+    pub const CLOSED: [CanonicalState; 2] = [CanonicalState::Done, CanonicalState::Archive];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -209,6 +218,20 @@ impl Config {
             .ok_or(ConfigError::UnmappedState { state })
     }
 
+    /// Columns where work has ended, so `--active` can filter by exclusion: every
+    /// other column counts as active, which keeps board-specific lanes that map to
+    /// no canonical state (a "Do today") in the answer instead of dropping them.
+    pub fn closed_column_ids(&self) -> Result<Vec<&str>, ConfigError> {
+        let columns: Vec<&str> = CanonicalState::CLOSED
+            .into_iter()
+            .filter_map(|state| self.states.get(state))
+            .collect();
+        if columns.is_empty() {
+            return Err(ConfigError::NoClosedState);
+        }
+        Ok(columns)
+    }
+
     /// Reverse lookup used when printing a task's state instead of its column.
     pub fn state_for_column(&self, column_id: &str) -> Option<CanonicalState> {
         CanonicalState::ALL
@@ -280,5 +303,27 @@ mod tests {
             Some(CanonicalState::Done)
         );
         assert_eq!(config.state_for_column("Cunknown"), None);
+    }
+
+    #[test]
+    fn closed_columns_skip_unmapped_states_and_fail_when_there_are_none() {
+        let mut config = sample();
+        assert_eq!(
+            config.closed_column_ids().expect("done is mapped"),
+            vec!["COxkPjd0wra4"]
+        );
+        config
+            .states
+            .set(CanonicalState::Archive, Some("CarchiveXX".to_string()));
+        assert_eq!(
+            config.closed_column_ids().expect("both are mapped"),
+            vec!["COxkPjd0wra4", "CarchiveXX"]
+        );
+        config.states.set(CanonicalState::Done, None);
+        config.states.set(CanonicalState::Archive, None);
+        assert!(matches!(
+            config.closed_column_ids(),
+            Err(ConfigError::NoClosedState)
+        ));
     }
 }

@@ -3,7 +3,8 @@
 Every command, every flag, as the binary reports it. Grammar: `kf <noun> <verb> [args] [flags]`.
 
 `<TASK>` is always a task number (`E613`) or a task ID. Commands marked **guarded** refuse to
-mutate a task someone else is responsible for and exit `3` until `--force` is passed.
+mutate a task that is nobody's or a teammate's and exit `3` until `--force` is passed; being the
+responsible user **or** a collaborator makes it yours.
 
 - [init](#init)
 - [auth](#auth) — [login](#auth-login), [logout](#auth-logout), [status](#auth-status)
@@ -166,12 +167,35 @@ kf task list [OPTIONS]
 
 | Flag | Value | Effect | Default |
 | --- | --- | --- | --- |
-| `--state` | state | Only tasks in this canonical state. | all |
+| `--state` | state | Only tasks in this canonical state; repeatable, and several states select the union of their columns. | all |
 | `--column` | `NAME_OR_ID` | Only tasks in this column, by name or ID — for columns with no canonical state. | all |
-| `--mine` | — | Only tasks you are responsible for. | all |
+| `--active` | — | Only unfinished work: every column except those mapped to `done` and `archive`. | all |
+| `--mine` | — | Only tasks you are responsible for **or** a collaborator on. | all |
 | `--json` | — | Print JSON instead of the human-readable output. | human |
 
+`--state`, `--column` and `--active` are mutually exclusive.
+
+State names are matched case-insensitively. A state with no column mapped in
+`.mpx/kanbanflow.json` is an error (exit 7), not an empty result.
+
+`--active` filters by **exclusion**, which is what makes it board-agnostic: it drops the `done`
+and `archive` columns and keeps everything else, including lanes the board invented that map to no
+canonical state (a "Do today", a "Blocked"). Listing the open states by hand instead would silently
+miss those. It needs at least one of `done` / `archive` mapped — with neither, there is nowhere for
+work to end and the command exits 7.
+
+`--mine` follows the board's own reading of "assigned to me": KanbanFlow draws your avatar on a
+card whether you are its responsible user or one of its collaborators, and teams that assign work
+by adding collaborators would otherwise see nothing. The `PEOPLE` column shows the responsible
+user first, then each collaborator prefixed with `+` — so `+me` is a task you collaborate on but
+are not responsible for. A `+me` task is yours to mutate as well; only `kf task grab` still judges
+by the responsible user alone.
+
+The `STATE` column prints the canonical state, or the column's name when it has none.
+
 ```bash
+kf task list --active --mine                   # everything of mine that is not finished
+kf task list --state todo --state wip --mine   # the same, restricted to two named states
 kf task list --state wip --mine
 ```
 
@@ -248,6 +272,10 @@ kf task grab <TASK> [OPTIONS]
 | `--download-dir` | `DIR` | Save the task's image attachments into this directory. | off |
 | `--force` | — | Grab a task someone else is responsible for. | off |
 | `--json` | — | Print JSON instead of the human-readable output. | human |
+
+Grabbing rewrites the responsible user, so it is the one guarded command judged on that field
+alone: collaborating on a teammate's task does not let you pull their name off it without
+`--force`. An unassigned task is fair game.
 
 ```bash
 kf task grab E613 --download-dir ./attachments --json

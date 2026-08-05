@@ -21,7 +21,8 @@ budget, token rules.
 
 ## Ownership guardrail — read before any mutation
 
-Every mutating command refuses a task that is not yours and exits **3**.
+Every mutating command refuses a task that is not yours and exits **3**. Yours means you are its
+responsible user **or** one of its collaborators.
 
 - Exit 3 → **stop and ask the human.** Report whose task it is.
 - Never add `--force` on your own initiative. Use it only in the same turn the human
