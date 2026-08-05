@@ -46,6 +46,20 @@ What: `kf task move --to todo|wip|review|done|archive` resolves through a commit
 Why: Skills and agents stay portable across boards with different column names; auto-move triggers (start work → wip, MR open → review, MR merged → done) live in skills.
 Rejected: Raw column names/IDs in every call (brittle, board-specific); webhooks for auto-move (needs a 24/7 public listener; a CLI cannot receive them).
 
+### Acting user lives in the user-level registry, not in the committed config
+
+Decided: 2026-08-05
+What: `.mpx/kanbanflow.json` holds board facts only. Which board member `kf` acts as is settled once per board at `kf auth login` (or the first `kf init`), stored in `boards.json` beside the token, overridable with `KANBANFLOW_USER_ID`. A `userId` in an older config is still read, last, for compatibility.
+Why: The file is committed so the team shares one column mapping, but the acting user differs per teammate — a cloned `userId` made `--mine` list its author's tasks and pointed the guardrail at the wrong cards. A KanbanFlow token is per board and the API has no "who am I" endpoint, so identity is a choice and cannot be derived.
+Rejected: Gitignoring the whole config (loses the shared mapping that is the file's reason to exist); keeping `userId` and having each teammate re-run `kf init` (a merge conflict on every clone, and silently wrong until someone notices).
+
+### `.mpx/` is tracked; only `.mpx/tmp/` is ignored
+
+Decided: 2026-08-05
+What: Repos commit `.mpx/` — `CONTEXT.md`, `DECISIONS.md`, `kanbanflow.json` — and gitignore `.mpx/tmp/`, the scratch area the `kf-` skills download attachments into.
+Why: The directory's contents are now all team-shared by construction; one namespace tracked or ignored as a unit beats a root dotfile plus a separate scratch directory, and the skills already write scratch under `.mpx/tmp/`.
+Rejected: A root `.kanbanflow.json` (a rename touching config, init, skills and docs for no functional gain); gitignoring all of `.mpx/` (would drop the shared column mapping and the decision log).
+
 ### Token in Windows Credential Manager, env var override
 
 Decided: 2026-07-31

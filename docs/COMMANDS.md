@@ -30,6 +30,10 @@ Token order: `KANBANFLOW_TOKEN`, `--token`/`--token-stdin`, the stored token of 
 is already wired to, the stored token of a logged-in board (`--board`, or a question when several
 are logged in), then a hidden prompt. A token is pasted once per board, not once per repo.
 
+The written file holds board facts only. Who you are on the board goes into the user-level registry
+instead, and is asked for only when that board has no identity recorded yet — see
+[`auth login`](#auth-login).
+
 ```
 kf init [OPTIONS]
 ```
@@ -41,9 +45,9 @@ kf init [OPTIONS]
 | `--board` | `BOARD` | Use the stored token of this board (ID, name, or 1-based index from `kf auth status`). Skips the question when several boards are logged in. | one board: it; several: asks |
 | `--no-store` | — | Do not save the token in the OS credential store. | stores |
 | `--map` | `STATE=COLUMN` | Map a canonical state to a column; repeatable. Any use switches mapping to non-interactive mode and leaves unlisted states unmapped. `COLUMN` may be a name, a `uniqueId`, or a 1-based index. | interactive |
-| `--user` | `USER` | User ID, full name, or email the token acts as. | interactive |
+| `--user` | `USER` | Which board member you are: user ID, full name, or email. Recorded for you only, never written to the repo. | the recorded identity, else interactive |
 | `--overwrite` | — | Overwrite an existing `.mpx/kanbanflow.json`. Alias `--force`. | refuses |
-| `--json` | — | Print the written configuration as JSON. | human |
+| `--json` | — | Print the resulting configuration as JSON, plus the `userId` this run settled on. | human |
 
 ```bash
 kf init --map todo=To-do --map wip="In progress" --map done=Done --user U9kJ2b --json
@@ -55,8 +59,14 @@ kf init --map todo=To-do --map wip="In progress" --map done=Done --user U9kJ2b -
 
 ### auth login
 
-Store an API token for the board it belongs to, and record that board so `kf init` can reuse the
-token in any repo. Run once per board. `--json`: no. Guarded: no.
+Store an API token for the board it belongs to, record that board so `kf init` can reuse the token
+in any repo, and settle which board member you are. Run once per board. `--json`: no. Guarded: no.
+
+A KanbanFlow token belongs to a board rather than to a person, and the API has no "who am I"
+endpoint, so the acting user is a choice. It decides what `--mine` matches and which tasks the
+ownership guardrail protects, it differs per teammate, and it is therefore kept in the user-level
+registry rather than in the committed `.mpx/kanbanflow.json`. A board with a single member needs no
+question. `KANBANFLOW_USER_ID` overrides the recorded value for one invocation.
 
 ```
 kf auth login [OPTIONS]
@@ -67,15 +77,25 @@ kf auth login [OPTIONS]
 | `--token` | `TOKEN` | The API token, visible in shell history. | prompt |
 | `--token-stdin` | — | Read the token as a single line from stdin. | off |
 | `--with-token-file` | `PATH` | Read the token from this file instead of prompting. | off |
+| `--board` | `BOARD` | Re-use the token already stored for this board (ID, name, or 1-based index from `kf auth status`) instead of asking for one. Conflicts with the token flags. | asks for a token |
+| `--user` | `USER` | Which board member you are: user ID, full name, or email. | the recorded identity, else sole member, else asks |
 
 ```bash
-printf '%s' "$KANBANFLOW_TOKEN" | kf auth login --token-stdin
+printf '%s' "$KANBANFLOW_TOKEN" | kf auth login --token-stdin --user martin@example.com
+```
+
+`--board` exists for boards logged in before identities were recorded: it settles who you are
+without a trip to the KanbanFlow settings page for a token this machine already holds.
+
+```bash
+kf auth login --board "Team E" --user martin@example.com
 ```
 
 ### auth logout
 
-Delete a board's stored token and drop it from the board registry. `.mpx/kanbanflow.json` is left
-alone, so `kf auth login` restores access. `--json`: no. Guarded: no.
+Delete a board's stored token and drop it from the board registry, along with the identity recorded
+for it. `.mpx/kanbanflow.json` is left alone, so `kf auth login` restores both. `--json`: no.
+Guarded: no.
 
 ```
 kf auth logout [OPTIONS]
@@ -97,8 +117,9 @@ kf auth logout --board "Team E" --yes
 
 ### auth status
 
-Show which token source this directory would use, and which boards are logged in. Makes no HTTP
-request. `--json`: yes (adds `knownBoards`). Guarded: no.
+Show which token source this directory would use, who you act as on this repo's board, and which
+boards are logged in. Makes no HTTP request. `--json`: yes (adds `userId` and `knownBoards`).
+Guarded: no.
 
 ```
 kf auth status [--json]

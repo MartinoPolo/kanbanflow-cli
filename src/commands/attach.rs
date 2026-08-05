@@ -103,7 +103,7 @@ pub fn run(command: AttachCommand) -> anyhow::Result<()> {
 
 fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("attaching files to task {}", task.reference()))?;
 
     let path = format!("tasks/{}/attachments", task.id);
@@ -218,7 +218,7 @@ fn download(context: &Context, args: DownloadArgs) -> anyhow::Result<()> {
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("deleting an attachment of task {}", task.reference()))?;
 
     let attachments = fetch_attachments(&context.client, &task.id)?;

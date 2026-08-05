@@ -5,12 +5,17 @@ Shared contract for every `kf-` skill. `kf` is the KanbanFlow CLI (`gh`-style gr
 
 ## Preconditions
 
-- The repo has `.mpx/kanbanflow.json` (written by `kf init`): board ID, column → canonical
-  state mapping, your user ID. Missing or broken → exit code **7**; stop and tell the human
-  to run `kf init`.
+- The repo has `.mpx/kanbanflow.json` (written by `kf init`): board ID and the column →
+  canonical state mapping. It is committed and shared, so it holds board facts only. Missing
+  or broken → exit code **7**; stop and tell the human to run `kf init`.
 - `kf` is on PATH.
 - Token comes from the OS credential store or `KANBANFLOW_TOKEN`. **Never** read, print, or
   write a token, and never put one in a file, a command line, or a commit.
+- Which user you act as is per person, not per repo: it comes from the user-level board
+  registry or `KANBANFLOW_USER_ID`, and decides what `--mine` matches and which tasks the
+  guardrail protects. Unknown → the command fails; tell the human to run `kf auth login`.
+  **Never** write a user ID into `.mpx/kanbanflow.json` — it would make every teammate act
+  as whoever wrote it.
 
 ## Vocabulary
 
@@ -46,7 +51,7 @@ Say "task", never "issue" or "card".
 | 1 | Generic failure | read stderr, fix the cause |
 | 2 | Usage error | fix the flags |
 | 3 | Guardrail refusal (task is not yours) | **Stop. Ask the human.** Never retry with `--force` on your own initiative. |
-| 4 | No usable token / rejected | tell the human to run `kf auth login` |
+| 4 | No usable token / rejected, or unknown board user | tell the human to run `kf auth login` |
 | 5 | Task, comment or attachment not found | verify the reference |
 | 6 | Rate limited | stop, report, do not retry |
 | 7 | No usable `.mpx/kanbanflow.json` | tell the human to run `kf init` |

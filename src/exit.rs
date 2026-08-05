@@ -5,6 +5,7 @@ use crate::config::ConfigError;
 use crate::guard::GuardError;
 use crate::resolve::ResolveError;
 use crate::token::TokenError;
+use crate::users::UnknownUser;
 
 /// Anything that is not one of the specific cases below.
 pub const FAILURE: i32 = 1;
@@ -12,7 +13,8 @@ pub const FAILURE: i32 = 1;
 pub const USAGE: i32 = 2;
 /// The shared-board guardrail refused a mutation; `--force` overrides.
 pub const GUARDRAIL: i32 = 3;
-/// No usable API token, or the API rejected it.
+/// No usable API token, the API rejected it, or `kf` does not know which board
+/// user it acts as. All three are fixed by `kf auth login`.
 pub const AUTH: i32 = 4;
 /// The board, task, comment or attachment does not exist.
 pub const NOT_FOUND: i32 = 5;
@@ -26,7 +28,8 @@ pub fn classify(error: &anyhow::Error) -> i32 {
     if error.downcast_ref::<GuardError>().is_some() {
         return GUARDRAIL;
     }
-    if error.downcast_ref::<TokenError>().is_some() {
+    if error.downcast_ref::<TokenError>().is_some() || error.downcast_ref::<UnknownUser>().is_some()
+    {
         return AUTH;
     }
     if error.downcast_ref::<ConfigError>().is_some() {
@@ -120,6 +123,17 @@ mod tests {
         })
         .context("looking up task E613");
         assert_eq!(classify(&error), NOT_FOUND);
+    }
+
+    /// Not knowing who we are is an authentication gap, and an agent's reaction
+    /// to it is the same as to a missing token.
+    #[test]
+    fn an_unknown_board_user_exits_as_an_auth_failure() {
+        let error = anyhow::Error::new(UnknownUser {
+            board_id: "F2QMK1B".to_string(),
+        })
+        .context("listing my tasks");
+        assert_eq!(classify(&error), AUTH);
     }
 
     #[test]

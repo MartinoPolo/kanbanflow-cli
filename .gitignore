@@ -5,3 +5,7 @@ node_modules/
 
 # IDE
 .vscode/
+
+# .mpx/ is tracked — the board config and the decision log are shared.
+# Only its scratch area, where the kf- skills download attachments, is not.
+.mpx/tmp/

@@ -1,4 +1,4 @@
-//! Turning user IDs into names for human-readable output.
+//! Which board user `kf` acts as, and turning user IDs into names for output.
 //!
 //! Task, comment and attachment payloads carry only user IDs. `GET /users` maps
 //! them to names, but it costs a request out of the board's 1000/hour budget and
@@ -7,32 +7,172 @@
 
 use std::collections::HashMap;
 
+use anyhow::Context as _;
+
 use crate::api::models::User;
 use crate::api::Client;
+use crate::boards;
+use crate::config::Config;
+use crate::prompt::{ask, require_terminal};
+
+pub const USER_ID_ENV_VAR: &str = "KANBANFLOW_USER_ID";
+
+/// Who `kf` acts as on this repo's board, or `None` when nothing has recorded
+/// it. Identity is per person and per machine, so it is looked up outside the
+/// committed config: the environment variable first, so an agent or CI run can
+/// state it without touching any file, then the user-level board registry.
+///
+/// A `userId` left in a config written by an older `kf init` is the last
+/// resort, and deliberately the weakest source — it may well have been
+/// committed by a teammate, in which case the registry's answer is the right
+/// one.
+pub fn my_user_id(config: &Config) -> Option<String> {
+    if let Some(user_id) = from_env() {
+        return Some(user_id);
+    }
+    if let Some(user_id) = boards::load().user_id(&config.board_id) {
+        return Some(user_id.to_string());
+    }
+    config.legacy_user_id.clone()
+}
+
+/// The identity from `KANBANFLOW_USER_ID`, if it is set and non-empty.
+fn from_env() -> Option<String> {
+    std::env::var(USER_ID_ENV_VAR)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// What every command that needs to know "me" fails with when nothing does.
+/// A distinct type so it exits 4 alongside the token failures: the reaction is
+/// the same, `kf auth login`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "`kf` does not know which user you are on board `{board_id}`, so it cannot tell your tasks \
+     from a teammate's. Run `kf auth login --board {board_id} --user <you>` to record it, or set \
+     {USER_ID_ENV_VAR}."
+)]
+pub struct UnknownUser {
+    pub board_id: String,
+}
+
+/// The board user to act as: `needle` when given, otherwise the board's only
+/// member, otherwise a question.
+///
+/// The API exposes no "who am I" endpoint — `GET /users` lists the board's
+/// members without marking the one the token acts as, and a KanbanFlow token
+/// belongs to a board rather than to a person. So the answer is a choice, not
+/// something derivable, which is exactly why it cannot be shared through a
+/// committed file.
+pub fn resolve(needle: Option<&str>, users: &[User]) -> anyhow::Result<String> {
+    if let Some(needle) = needle {
+        return match find(users, needle) {
+            Some(user) => Ok(user.id.clone()),
+            None => anyhow::bail!(
+                "no board user matches `{needle}`. Known users: {}",
+                describe(users)
+            ),
+        };
+    }
+    match users {
+        [] => anyhow::bail!("the board reports no users; cannot determine who the token acts as"),
+        [only] => Ok(only.id.clone()),
+        many => {
+            require_terminal("--user <userId>")?;
+            println!("Which user are you on this board?");
+            for (index, user) in many.iter().enumerate() {
+                println!(
+                    "  {}. {} ({})",
+                    index + 1,
+                    user.full_name,
+                    user.email.as_deref().unwrap_or(&user.id)
+                );
+            }
+            loop {
+                let answer = ask(&format!("User [1-{}]: ", many.len()))?;
+                if let Some(user) = find(many, &answer) {
+                    return Ok(user.id.clone());
+                }
+                eprintln!("Not a valid choice; enter an index, a full name, an email or an ID.");
+            }
+        }
+    }
+}
+
+/// Who this machine acts as on `board_id`, settling it if it is not settled
+/// yet. Consulting the registry first is what keeps a second repo — or a second
+/// `kf auth login` — from repeating the question and spending a `GET /users`
+/// request out of the board's hourly budget.
+pub fn resolve_for_board(
+    needle: Option<&str>,
+    client: &Client,
+    board_id: &str,
+) -> anyhow::Result<String> {
+    if needle.is_none() {
+        if let Some(user_id) = boards::load().user_id(board_id) {
+            return Ok(user_id.to_string());
+        }
+    }
+    let users: Vec<User> = client
+        .get_json("users", &[])
+        .context("listing the board's users (GET /users)")?;
+    resolve(needle, &users)
+}
+
+/// Match a user by ID, 1-based index, full name or email (case-insensitive).
+pub fn find<'a>(users: &'a [User], needle: &str) -> Option<&'a User> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    users
+        .iter()
+        .find(|user| user.id == needle)
+        .or_else(|| {
+            users
+                .iter()
+                .find(|user| user.full_name.eq_ignore_ascii_case(needle))
+        })
+        .or_else(|| {
+            users.iter().find(|user| {
+                user.email
+                    .as_deref()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(needle))
+            })
+        })
+        .or_else(|| {
+            needle
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| users.get(index.checked_sub(1)?))
+        })
+}
+
+/// `Name (ID), Name (ID)` — for error messages that list the alternatives.
+pub fn describe(users: &[User]) -> String {
+    users
+        .iter()
+        .map(|user| format!("{} ({})", user.full_name, user.id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 pub struct UserNames<'a> {
     client: &'a Client,
-    /// The token's own user, rendered as `me`. `None` where that would be
-    /// misleading, such as a comment listing that shows real authors.
+    /// The user we act as, rendered as `me`. `None` where that would be
+    /// misleading, such as a comment listing that shows real authors, and where
+    /// this machine has no identity for the board at all.
     my_user_id: Option<&'a str>,
     names: Option<HashMap<String, String>>,
 }
 
 impl<'a> UserNames<'a> {
-    /// Render the token's own user ID as `me`.
-    pub fn new(client: &'a Client, my_user_id: &'a str) -> Self {
+    /// Render `my_user_id` as `me`; pass `None` to name every user instead.
+    pub fn new(client: &'a Client, my_user_id: Option<&'a str>) -> Self {
         Self {
             client,
-            my_user_id: Some(my_user_id),
-            names: None,
-        }
-    }
-
-    /// Render every user, including the token's own, by name.
-    pub fn without_me(client: &'a Client) -> Self {
-        Self {
-            client,
-            my_user_id: None,
+            my_user_id,
             names: None,
         }
     }
@@ -62,5 +202,52 @@ impl<'a> UserNames<'a> {
                 })
                 .unwrap_or_default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn users() -> Vec<User> {
+        vec![
+            User {
+                id: "U1".to_string(),
+                full_name: "John Smith".to_string(),
+                email: Some("john@example.com".to_string()),
+            },
+            User {
+                id: "U2".to_string(),
+                full_name: "Jane Doe".to_string(),
+                email: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn find_matches_id_name_email_and_index() {
+        let users = users();
+        assert_eq!(find(&users, "U2").map(|user| user.id.as_str()), Some("U2"));
+        assert_eq!(
+            find(&users, "jane doe").map(|user| user.id.as_str()),
+            Some("U2")
+        );
+        assert_eq!(
+            find(&users, "JOHN@EXAMPLE.COM").map(|user| user.id.as_str()),
+            Some("U1")
+        );
+        assert_eq!(find(&users, "1").map(|user| user.id.as_str()), Some("U1"));
+        assert!(find(&users, "").is_none());
+        assert!(find(&users, "9").is_none());
+    }
+
+    /// A board with one member needs no question, and an unmatched `--user` has
+    /// to name the alternatives rather than pick one.
+    #[test]
+    fn resolve_takes_a_sole_member_and_refuses_an_unknown_needle() {
+        assert_eq!(resolve(None, &users()[1..]).expect("sole member"), "U2");
+        let error = resolve(Some("nobody"), &users()).expect_err("no match");
+        assert!(error.to_string().contains("Jane Doe (U2)"), "{error}");
+        assert!(resolve(None, &[]).is_err(), "an empty board is unusable");
     }
 }

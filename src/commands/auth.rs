@@ -1,10 +1,13 @@
-//! `kf auth` — the API token in the OS credential store.
+//! `kf auth` — the API token in the OS credential store, and the board user it
+//! is used as.
 //!
 //! KanbanFlow tokens are per-board, so the board a token belongs to is
 //! discovered by calling `GET /board` with it; that call doubles as validation.
+//! A token belongs to a board rather than to a person, so logging in also
+//! settles which member of that board this machine acts as.
 //! This module also owns the token-input helpers `kf init` reuses.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -15,8 +18,9 @@ use crate::api::Client;
 use crate::boards;
 use crate::config::{Config, CONFIG_RELATIVE_PATH};
 use crate::output;
-use crate::prompt::confirm;
+use crate::prompt::{confirm, read_line};
 use crate::token;
+use crate::users;
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
@@ -39,6 +43,15 @@ pub struct LoginArgs {
     /// Read the token from this file instead of prompting.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "token_stdin"])]
     pub with_token_file: Option<PathBuf>,
+    /// Re-use the token already stored for this board (ID, name, or 1-based
+    /// index from `kf auth status`) instead of asking for one. Pair it with
+    /// `--user` to record who you are on a board you logged in to earlier.
+    #[arg(long, value_name = "BOARD", conflicts_with_all = ["token", "token_stdin", "with_token_file"])]
+    pub board: Option<String>,
+    /// Which board member you are: a user ID, full name or email. Asked for on
+    /// a multi-member board when it is not already known.
+    #[arg(long, value_name = "USER")]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -71,17 +84,29 @@ pub fn run(command: AuthCommand) -> anyhow::Result<()> {
 }
 
 fn login(args: LoginArgs) -> anyhow::Result<()> {
-    let api_token = read_token(
-        args.token,
-        args.token_stdin,
-        args.with_token_file.as_deref(),
-    )?;
-    let (_client, board) = verify_token(&api_token)?;
-    token::store(&board.id, &api_token)
-        .with_context(|| format!("storing the token for board `{}`", board.id))?;
-    remember_board(&board.id, &board.name);
+    let reused = args.board.is_some();
+    let api_token = match &args.board {
+        Some(needle) => stored_token_of(needle)?,
+        None => read_token(
+            args.token,
+            args.token_stdin,
+            args.with_token_file.as_deref(),
+        )?,
+    };
+    let (client, board) = verify_token(&api_token)?;
+    if !reused {
+        token::store(&board.id, &api_token)
+            .with_context(|| format!("storing the token for board `{}`", board.id))?;
+    }
 
-    println!("Stored the token for {} ({}).", board.name, board.id);
+    let user_id = users::resolve_for_board(args.user.as_deref(), &client, &board.id)?;
+    remember_board(&board.id, &board.name, Some(&user_id));
+
+    match reused {
+        true => println!("Kept the stored token for {} ({}).", board.name, board.id),
+        false => println!("Stored the token for {} ({}).", board.name, board.id),
+    }
+    println!("Acting as user {user_id} on this board.");
     println!("`kf init` in any repo can now use it without asking for the token again.");
     if token::from_env().is_some() {
         println!(
@@ -90,6 +115,28 @@ fn login(args: LoginArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// The token already in the credential store for `needle`, so `--user` can be
+/// recorded for a board logged in before identities were kept — without a trip
+/// to the KanbanFlow settings page for a token that is already on this machine.
+///
+/// A board that predates the registry is listed nowhere, so an unmatched needle
+/// is taken as a raw board ID, the same fallback `kf auth logout` allows.
+fn stored_token_of(needle: &str) -> anyhow::Result<String> {
+    let registry = boards::load();
+    let board_id = match registry.find(needle) {
+        Some(board) => board.id.clone(),
+        None if stored_token_present(needle) => needle.to_string(),
+        None => anyhow::bail!(
+            "no logged-in board and no stored token matches `{needle}`.{}",
+            match registry.boards.is_empty() {
+                true => " Run `kf auth login` without --board to paste one.".to_string(),
+                false => format!(" Logged in to: {}", registry.describe()),
+            }
+        ),
+    };
+    Ok(token::stored(&board_id)?)
 }
 
 /// A board `kf auth logout` will forget. The name is absent for a credential
@@ -237,6 +284,7 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
     };
 
     let registry = boards::load();
+    let user_id = config.as_ref().and_then(users::my_user_id);
 
     if args.json {
         return output::print_json(&serde_json::json!({
@@ -245,6 +293,7 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
             "storedInCredentialStore": stored,
             "boardId": config.as_ref().map(|config| config.board_id.as_str()),
             "boardName": config.as_ref().map(|config| config.board_name.as_str()),
+            "userId": user_id,
             "knownBoards": registry.boards,
         }))
         .map_err(Into::into);
@@ -254,6 +303,14 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
     match &config {
         Some(config) => println!("Board:        {} ({})", config.board_name, config.board_id),
         None => println!("Board:        unknown (no `{CONFIG_RELATIVE_PATH}`)"),
+    }
+    match &user_id {
+        Some(user_id) => println!("Acting as:    {user_id}"),
+        None if config.is_some() => println!(
+            "Acting as:    unknown — run `kf auth login` or set {}",
+            users::USER_ID_ENV_VAR
+        ),
+        None => {}
     }
     if registry.boards.is_empty() {
         println!("Logged in to: no board yet");
@@ -268,23 +325,22 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Record the board in the user-level registry so a later `kf init` can find
-/// its token. A failure here is a warning: the token is stored either way, and
-/// the registry is only a lookup aid.
-pub(crate) fn remember_board(board_id: &str, board_name: &str) {
-    if let Err(error) = boards::remember(board_id, board_name) {
+/// Record the board, and who we are on it, in the user-level registry so a
+/// later `kf init` can find its token and skip the identity question. A failure
+/// here is a warning: the token is stored either way, and the registry is only
+/// a lookup aid.
+pub(crate) fn remember_board(board_id: &str, board_name: &str, user_id: Option<&str>) {
+    if let Err(error) = boards::remember(board_id, board_name, user_id) {
         eprintln!("warning: could not record the board in the registry: {error}");
     }
 }
 
-/// True when the credential store holds a token for this board. The keyring is
-/// queried directly, because `token::resolve` would answer with the environment
+/// True when the credential store holds a token for this board — `token::stored`
+/// rather than `token::resolve`, which would answer with the environment
 /// variable instead. A store error is reported as "absent": status is
 /// diagnostic and must never fail hard.
 fn stored_token_present(board_id: &str) -> bool {
-    keyring::Entry::new(token::KEYRING_SERVICE, board_id)
-        .and_then(|entry| entry.get_password())
-        .is_ok()
+    token::stored(board_id).is_ok()
 }
 
 /// `GET /board` with a candidate token: proves the token works and reveals
@@ -312,7 +368,7 @@ pub(crate) fn read_token(
     let raw = match (flag, from_stdin, file) {
         (Some(value), _, _) => value,
         (None, true, _) => {
-            read_line_from_stdin().context("reading the API token from stdin (--token-stdin)")?
+            read_line().context("reading the API token from stdin (--token-stdin)")?
         }
         (None, false, Some(path)) => std::fs::read_to_string(path)
             .with_context(|| format!("reading the API token from `{}`", path.display()))?,
@@ -349,23 +405,9 @@ pub(crate) fn prompt_for_token() -> anyhow::Result<String> {
             );
             eprint!("Token: ");
             std::io::stderr().flush().ok();
-            read_line_from_stdin()
+            read_line()
         }
     }
-}
-
-/// One line from stdin, without its trailing newline.
-pub(crate) fn read_line_from_stdin() -> anyhow::Result<String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .context("reading from stdin")?;
-    // The newline is a control character: left in place it reaches the
-    // `Authorization` header and makes it unparseable.
-    let length = line.trim_end_matches(['\r', '\n']).len();
-    line.truncate(length);
-    Ok(line)
 }
 
 #[cfg(test)]
@@ -399,6 +441,7 @@ mod tests {
                 .map(|(id, name)| boards::KnownBoard {
                     id: (*id).to_string(),
                     name: (*name).to_string(),
+                    user_id: None,
                 })
                 .collect(),
         }

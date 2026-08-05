@@ -294,7 +294,7 @@ fn create(context: &Context, args: CreateArgs) -> anyhow::Result<()> {
         color: args.color.map(|color| color.as_str().to_string()),
         responsible_user_id: create_responsible_user_id(
             args.responsible.as_deref(),
-            context.my_user_id(),
+            context.my_user_id()?,
         )?,
         grouping_date: args.grouping_date,
         labels,
@@ -391,7 +391,7 @@ fn view(context: &Context, args: ViewArgs) -> anyhow::Result<()> {
     if args.json {
         return Ok(output::print_json(&aggregate)?);
     }
-    let mut users = UserNames::new(&context.client, context.my_user_id());
+    let mut users = UserNames::new(&context.client, context.my_user_id_optional());
     print_aggregate(&aggregate, &context.config, &mut users);
     Ok(())
 }
@@ -617,17 +617,20 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
         }
     }
 
+    // `--mine` is the only filter that has to know who we are, so the identity
+    // is demanded here rather than for every listing.
+    let me = args.mine.then(|| context.my_user_id()).transpose()?;
     let tasks: Vec<&Task> = selected
         .iter()
         .flat_map(|group| group.tasks.iter())
-        .filter(|task| !args.mine || guard::is_mine(task, context.my_user_id()))
+        .filter(|task| me.is_none_or(|me| guard::is_mine(task, me)))
         .collect();
 
     if args.json {
         return Ok(output::print_json(&tasks)?);
     }
 
-    let mut users = UserNames::new(&context.client, context.my_user_id());
+    let mut users = UserNames::new(&context.client, context.my_user_id_optional());
     let mut table = Table::new(&["NUMBER", "STATE", "NAME", "PEOPLE", "LABELS"]);
     // A column with no canonical state still has a name in the listing response,
     // which beats printing its raw ID.
@@ -660,7 +663,7 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
 
 fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("editing task {}", task.reference()))?;
 
     let mut update = UpdateTask {
@@ -674,7 +677,7 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     };
     if let Some(responsible) = &args.responsible {
         update.responsible_user_id = Some(
-            responsible_user_id(responsible, context.my_user_id())?
+            responsible_user_id(responsible, context.my_user_id()?)?
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
         );
@@ -769,7 +772,7 @@ fn changed_labels(current: &[Label], added: &[String], removed: &[String]) -> Op
 
 fn move_task(context: &Context, args: MoveArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("moving task {} to {}", task.reference(), args.to))?;
     let column_id = context.config.column_id(args.to)?.to_string();
     if let Some(date) = &args.grouping_date {
@@ -794,7 +797,7 @@ fn move_task(context: &Context, args: MoveArgs) -> anyhow::Result<()> {
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("deleting task {}", task.reference()))?;
     if !args.yes
         && !confirm(&format!(
@@ -820,13 +823,13 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
 
 fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
     let mut task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_take_over(&task, context.my_user_id(), args.force)
+    guard::ensure_can_take_over(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("grabbing task {}", task.reference()))?;
     let column_id = context.config.column_id(CanonicalState::Wip)?.to_string();
 
     let update = UpdateTask {
         column_id: Some(column_id.clone()),
-        responsible_user_id: Some(serde_json::Value::String(context.my_user_id().to_string())),
+        responsible_user_id: Some(serde_json::Value::String(context.my_user_id()?.to_string())),
         ..Default::default()
     };
     context
@@ -835,7 +838,7 @@ fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
         .with_context(|| format!("grabbing task {}", task.reference()))?;
     // Mirror the accepted update locally instead of spending a re-read.
     task.column_id = column_id;
-    task.responsible_user_id = Some(context.my_user_id().to_string());
+    task.responsible_user_id = Some(context.my_user_id()?.to_string());
 
     // Everything below is read-only follow-up. The single POST above already
     // landed both the assignment and the move, so failures here say so.
@@ -858,7 +861,7 @@ fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
     if args.json {
         return Ok(output::print_json(&aggregate)?);
     }
-    let mut users = UserNames::new(&context.client, context.my_user_id());
+    let mut users = UserNames::new(&context.client, context.my_user_id_optional());
     print_aggregate(&aggregate, &context.config, &mut users);
     Ok(())
 }
@@ -900,7 +903,7 @@ impl FinishProgress {
 
 fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("finishing task {}", task.reference()))?;
     let column_id = context.config.column_id(args.to)?.to_string();
     let mut progress = FinishProgress::default();
@@ -1068,7 +1071,7 @@ mod tests {
         Config {
             board_id: "F2QMK1B".to_string(),
             board_name: "My first board".to_string(),
-            user_id: "VrvR3H".to_string(),
+            legacy_user_id: None,
             states: StateColumns {
                 todo: Some("CTODO".to_string()),
                 wip: Some("CWIP".to_string()),

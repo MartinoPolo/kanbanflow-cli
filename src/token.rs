@@ -153,6 +153,13 @@ pub fn resolve(board_id: &str) -> Result<String, TokenError> {
     if let Some(token) = from_env() {
         return Ok(token);
     }
+    stored(board_id)
+}
+
+/// The credential store's token for one board, ignoring the environment
+/// variable — for callers that mean *this board's own* credential rather than
+/// whatever token the process happens to have been handed.
+pub fn stored(board_id: &str) -> Result<String, TokenError> {
     match entry(board_id)?.get_password() {
         Ok(token) => Ok(token),
         Err(keyring::Error::NoEntry) => Err(TokenError::Missing {

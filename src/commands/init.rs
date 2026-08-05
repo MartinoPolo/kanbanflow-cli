@@ -4,19 +4,19 @@
 //! Interactive by default; fully scriptable with `--map` and `--user` so agents
 //! and CI can set a repo up without a terminal.
 
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context as _;
 use clap::Args;
 
-use crate::api::models::{Board, Column, User};
+use crate::api::models::{Board, Column};
 use crate::boards;
 use crate::commands::auth;
 use crate::config::{CanonicalState, Config, StateColumns, CONFIG_RELATIVE_PATH};
 use crate::output::{self, Table};
-use crate::prompt::require_terminal;
+use crate::prompt::{ask, require_terminal};
 use crate::token;
+use crate::users;
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
@@ -39,7 +39,8 @@ pub struct InitArgs {
     /// `kf auth status`). Skips the question when several boards are logged in.
     #[arg(long, value_name = "BOARD")]
     pub board: Option<String>,
-    /// The user ID (or full name / email) the token acts as.
+    /// The user ID (or full name / email) you are on this board. Recorded
+    /// per user, outside the repo; only asked for when it is not known yet.
     #[arg(long, value_name = "USER")]
     pub user: Option<String>,
     /// Overwrite an existing `.mpx/kanbanflow.json`.
@@ -74,28 +75,44 @@ pub fn run(args: InitArgs) -> anyhow::Result<()> {
     if !args.no_store && matches!(source, TokenSource::Argument | TokenSource::Prompt) {
         token::store(&board.id, &api_token)
             .with_context(|| format!("storing the token for board `{}`", board.id))?;
-        // Registering it here is what lets the next repo skip the token entirely.
-        auth::remember_board(&board.id, &board.name);
     }
 
-    let users: Vec<User> = client
-        .get_json("users", &[])
-        .context("listing the board's users (GET /users)")?;
-    let user_id = resolve_user(&args, &users)?;
+    let user_id = users::resolve_for_board(args.user.as_deref(), &client, &board.id)?;
+    // Recorded even when the token was not stored: the identity has nowhere
+    // else to live now that it is out of the committed config, and the registry
+    // holds no secrets. Registering the board here is also what lets the next
+    // repo skip the token entirely.
+    auth::remember_board(&board.id, &board.name, Some(&user_id));
+
     let states = resolve_states(&args, &board)?;
 
     let config = Config {
         board_id: board.id.clone(),
         board_name: board.name.clone(),
-        user_id,
+        legacy_user_id: None,
         states,
     };
     config.save_to(&target_path)?;
 
     if args.json {
-        return output::print_json(&config).map_err(Into::into);
+        // `userId` is reported although it is no longer part of the file, so a
+        // caller can still see which identity this run settled on.
+        return output::print_json(&serde_json::json!({
+            "boardId": config.board_id,
+            "boardName": config.board_name,
+            "userId": user_id,
+            "states": config.states,
+        }))
+        .map_err(Into::into);
     }
-    print_summary(&config, &board, &target_path, source, args.no_store);
+    print_summary(
+        &config,
+        &user_id,
+        &board,
+        &target_path,
+        source,
+        args.no_store,
+    );
     Ok(())
 }
 
@@ -189,7 +206,7 @@ fn choose_board(candidates: &[boards::KnownBoard]) -> anyhow::Result<Option<&boa
         println!("  {}. {}", index + 1, board);
     }
     loop {
-        let answer = prompt(&format!(
+        let answer = ask(&format!(
             "Board [1-{}, or `n` to paste a new token]: ",
             candidates.len()
         ))?;
@@ -202,81 +219,6 @@ fn choose_board(candidates: &[boards::KnownBoard]) -> anyhow::Result<Option<&boa
         }
         eprintln!("Not a valid choice; enter an index, a board name, an ID, or `n`.");
     }
-}
-
-/// The API exposes no "who am I" endpoint: `GET /users` lists the board's
-/// members without marking the one the token acts as, so the user is either
-/// given with `--user` or picked from the list.
-fn resolve_user(args: &InitArgs, users: &[User]) -> anyhow::Result<String> {
-    if let Some(needle) = &args.user {
-        return match find_user(users, needle) {
-            Some(user) => Ok(user.id.clone()),
-            None => anyhow::bail!(
-                "no board user matches `{needle}`. Known users: {}",
-                describe_users(users)
-            ),
-        };
-    }
-    match users {
-        [] => anyhow::bail!("the board reports no users; cannot determine who the token acts as"),
-        [only] => Ok(only.id.clone()),
-        many => {
-            require_terminal("--user <userId>")?;
-            println!("Which user does this API token act as?");
-            for (index, user) in many.iter().enumerate() {
-                println!(
-                    "  {}. {} ({})",
-                    index + 1,
-                    user.full_name,
-                    user.email.as_deref().unwrap_or(&user.id)
-                );
-            }
-            loop {
-                let answer = prompt(&format!("User [1-{}]: ", many.len()))?;
-                if let Some(user) = find_user(many, &answer) {
-                    return Ok(user.id.clone());
-                }
-                eprintln!("Not a valid choice; enter an index, a full name, an email or an ID.");
-            }
-        }
-    }
-}
-
-/// Match a user by ID, 1-based index, full name or email (case-insensitive).
-fn find_user<'a>(users: &'a [User], needle: &str) -> Option<&'a User> {
-    let needle = needle.trim();
-    if needle.is_empty() {
-        return None;
-    }
-    users
-        .iter()
-        .find(|user| user.id == needle)
-        .or_else(|| {
-            users
-                .iter()
-                .find(|user| user.full_name.eq_ignore_ascii_case(needle))
-        })
-        .or_else(|| {
-            users.iter().find(|user| {
-                user.email
-                    .as_deref()
-                    .is_some_and(|email| email.eq_ignore_ascii_case(needle))
-            })
-        })
-        .or_else(|| {
-            needle
-                .parse::<usize>()
-                .ok()
-                .and_then(|index| users.get(index.checked_sub(1)?))
-        })
-}
-
-fn describe_users(users: &[User]) -> String {
-    users
-        .iter()
-        .map(|user| format!("{} ({})", user.full_name, user.id))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn resolve_states(args: &InitArgs, board: &Board) -> anyhow::Result<StateColumns> {
@@ -362,7 +304,7 @@ fn map_states_interactively(columns: &[Column]) -> anyhow::Result<StateColumns> 
             None => " [skip]".to_string(),
         };
         loop {
-            let answer = prompt(&format!("{state}{hint}: "))?;
+            let answer = ask(&format!("{state}{hint}: "))?;
             let answer = answer.trim();
             if answer == "-" {
                 break;
@@ -410,16 +352,17 @@ fn suggest_column(state: CanonicalState, columns: &[Column]) -> Option<&Column> 
     columns.get(matched)
 }
 
-fn prompt(question: &str) -> anyhow::Result<String> {
-    print!("{question}");
-    std::io::stdout().flush().ok();
-    auth::read_line_from_stdin()
-}
-
-fn print_summary(config: &Config, board: &Board, path: &Path, source: TokenSource, no_store: bool) {
+fn print_summary(
+    config: &Config,
+    user_id: &str,
+    board: &Board,
+    path: &Path,
+    source: TokenSource,
+    no_store: bool,
+) {
     println!("Wrote {}", path.display());
     println!("Board: {} ({})", config.board_name, config.board_id);
-    println!("User:  {}", config.user_id);
+    println!("User:  {user_id} (recorded for you only, not in the repo)");
     match source {
         TokenSource::Environment => println!(
             "Token: {} (not stored in the credential store)",
@@ -450,7 +393,10 @@ fn print_summary(config: &Config, board: &Board, path: &Path, source: TokenSourc
         }
     }
     table.print();
-    println!("Commit `{CONFIG_RELATIVE_PATH}`: column IDs are not secrets.");
+    println!(
+        "Commit `{CONFIG_RELATIVE_PATH}`: it holds board facts only — no token, no user — so \
+         every teammate gets the same mapping."
+    );
 }
 
 #[cfg(test)]
@@ -527,39 +473,5 @@ mod tests {
             Some("Done")
         );
         assert!(suggest_column(CanonicalState::Archive, &columns).is_none());
-    }
-
-    #[test]
-    fn find_user_matches_id_name_email_and_index() {
-        let users = vec![
-            User {
-                id: "U1".to_string(),
-                full_name: "John Smith".to_string(),
-                email: Some("john@example.com".to_string()),
-            },
-            User {
-                id: "U2".to_string(),
-                full_name: "Jane Doe".to_string(),
-                email: None,
-            },
-        ];
-        assert_eq!(
-            find_user(&users, "U2").map(|user| user.id.as_str()),
-            Some("U2")
-        );
-        assert_eq!(
-            find_user(&users, "jane doe").map(|user| user.id.as_str()),
-            Some("U2")
-        );
-        assert_eq!(
-            find_user(&users, "JOHN@EXAMPLE.COM").map(|user| user.id.as_str()),
-            Some("U1")
-        );
-        assert_eq!(
-            find_user(&users, "1").map(|user| user.id.as_str()),
-            Some("U1")
-        );
-        assert!(find_user(&users, "").is_none());
-        assert!(find_user(&users, "9").is_none());
     }
 }

@@ -1,7 +1,7 @@
 //! Interactive prompting, and the rule that governs it: an agent or CI run has
 //! nobody to answer a question, so the CLI refuses instead of guessing.
 
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::Context as _;
 
@@ -31,4 +31,26 @@ pub fn confirm(question: &str) -> anyhow::Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+/// Print a question and read the answer. The caller has already established
+/// that there is a terminal to ask on, usually via `require_terminal`.
+pub fn ask(question: &str) -> anyhow::Result<String> {
+    print!("{question}");
+    std::io::stdout().flush().ok();
+    read_line()
+}
+
+/// One line from stdin, without its trailing newline.
+pub fn read_line() -> anyhow::Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading from stdin")?;
+    // The newline is a control character: left in place it reaches the
+    // `Authorization` header and makes it unparseable.
+    let length = line.trim_end_matches(['\r', '\n']).len();
+    line.truncate(length);
+    Ok(line)
 }

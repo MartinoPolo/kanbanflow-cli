@@ -1,7 +1,10 @@
 //! Per-repo board configuration stored at `.mpx/kanbanflow.json`.
 //!
 //! The file is committed: column IDs are not secrets, and the canonical-state
-//! mapping is what keeps `kf-` skills board-agnostic. The token never lives here.
+//! mapping is what keeps `kf-` skills board-agnostic. It therefore holds board
+//! facts only — everything here is identical for every member of the team. The
+//! token never lives here, and neither does the acting user, which is per person
+//! and lives in the user-level board registry instead (`crate::boards`).
 
 use std::path::{Path, PathBuf};
 
@@ -149,9 +152,11 @@ pub struct Config {
     pub board_id: String,
     #[serde(rename = "boardName")]
     pub board_name: String,
-    /// The user ID the API token acts as; basis for the ownership guardrail.
-    #[serde(rename = "userId")]
-    pub user_id: String,
+    /// Where the acting user used to be recorded, before it moved to the
+    /// user-level registry. Still read as a last resort so repos configured by
+    /// an older `kf init` keep working; never written again.
+    #[serde(rename = "userId", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_user_id: Option<String>,
     pub states: StateColumns,
 }
 
@@ -248,7 +253,7 @@ mod tests {
         Config {
             board_id: "F2QMK1B".to_string(),
             board_name: "My first board".to_string(),
-            user_id: "UHJ9JgtA".to_string(),
+            legacy_user_id: None,
             states: StateColumns {
                 todo: Some("C9LIn5sEEpqT".to_string()),
                 wip: Some("CBO1VNGqDc4K".to_string()),
@@ -267,13 +272,26 @@ mod tests {
         assert_eq!(config, parsed);
     }
 
+    /// The written file is what the team shares, so it must carry board facts
+    /// and nothing personal.
     #[test]
-    fn config_json_keys_are_stable_and_skip_unmapped_states() {
+    fn config_json_keys_are_stable_and_hold_no_user() {
         let json = serde_json::to_string(&sample()).expect("serializable");
         assert_eq!(
             json,
-            r#"{"boardId":"F2QMK1B","boardName":"My first board","userId":"UHJ9JgtA","states":{"todo":"C9LIn5sEEpqT","wip":"CBO1VNGqDc4K","done":"COxkPjd0wra4"}}"#
+            r#"{"boardId":"F2QMK1B","boardName":"My first board","states":{"todo":"C9LIn5sEEpqT","wip":"CBO1VNGqDc4K","done":"COxkPjd0wra4"}}"#
         );
+    }
+
+    /// A config written by an older `kf init` still parses, and its `userId`
+    /// stays available as the last-resort identity.
+    #[test]
+    fn a_config_with_a_legacy_user_id_still_parses() {
+        let config: Config = serde_json::from_str(
+            r#"{"boardId":"F2QMK1B","boardName":"My first board","userId":"UHJ9JgtA","states":{}}"#,
+        )
+        .expect("deserializable");
+        assert_eq!(config.legacy_user_id.as_deref(), Some("UHJ9JgtA"));
     }
 
     #[test]

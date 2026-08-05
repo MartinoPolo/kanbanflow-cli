@@ -23,13 +23,14 @@ Prebuilt cargo-dist installers are planned but **not yet published**.
 Authenticate **once per board**, then wire up as many repos as you like:
 
 ```bash
-kf auth login                  # once per board: store its API token
+kf auth login                  # once per board: store its API token and who you are on it
 cd /path/to/a/repo
-kf init                        # reuses the stored token, maps columns, writes .mpx/kanbanflow.json
+kf init                        # reuses both, maps columns, writes .mpx/kanbanflow.json
 ```
 
-`kf init` never asks for a token that is already stored. With several boards logged in it asks which
-one this repo belongs to; `--board <id|name>` answers that non-interactively.
+`kf init` never asks again for a token or an identity that is already stored. With several boards
+logged in it asks which one this repo belongs to; `--board <id|name>` answers that
+non-interactively.
 
 API tokens are **per board** and require a KanbanFlow premium plan; create one in the board's
 **Settings → API & Webhooks**.
@@ -66,34 +67,64 @@ Tokens are never written into a file in the repo. Resolution order:
    board ID under the service `kanbanflow-cli`
 
 `kf auth login` stores a token; `kf auth logout` deletes one; `kf auth status` shows which source
-this directory would use and which boards are logged in.
+this directory would use, who you are on the board, and which boards are logged in.
 
 The credential store cannot be enumerated portably, so the board IDs to look tokens up by are kept
 in a **user-level registry** — `%APPDATA%\kanbanflow-cli\boards.json` on Windows,
-`$XDG_CONFIG_HOME/kanbanflow-cli/boards.json` or `~/.config/…` elsewhere. It holds board IDs and
-names, never a token, and losing it costs nothing but one re-login. `kf init` reads it to reuse a
-stored token in a repo that has no `.mpx/kanbanflow.json` yet.
+`$XDG_CONFIG_HOME/kanbanflow-cli/boards.json` or `~/.config/…` elsewhere. It holds board IDs, board
+names and your user ID on each board, never a token, and losing it costs nothing but one re-login.
+`kf init` reads it to reuse a stored token in a repo that has no `.mpx/kanbanflow.json` yet.
 
 A pasted token is sanitized before use: surrounding whitespace is trimmed silently, and interior
 control codes, zero-width marks and BOMs are removed with a `note:` on stderr. Anything left that an
 HTTP header cannot carry is refused with exit 4 instead of reaching the API.
 
+## Who you are on a board
+
+A KanbanFlow token belongs to a **board**, not to a person, and the API has no "who am I" endpoint —
+so which board member you act as is a choice, made once per board at `kf auth login` (or the first
+`kf init`) and answered non-interactively by `--user <id|name|email>`. It decides what `--mine`
+matches and which tasks the ownership guardrail protects.
+
+Because it differs per teammate it is **never written into the repo**; it lives in the user-level
+registry beside the token. Resolution order:
+
+1. `KANBANFLOW_USER_ID` environment variable — for CI and agents with no registry to read
+2. The board registry
+3. A `userId` left in a `.mpx/kanbanflow.json` written by an older `kf init` — read for
+   compatibility, never written again
+
+If a repo you clone still carries someone else's `userId`, your own recorded identity wins. For a
+board you logged in to before identities were kept, record yours without re-pasting the token:
+
+```bash
+kf auth login --board "Team E" --user you@example.com
+```
+
+Then drop the stale `userId` key from the committed `.mpx/kanbanflow.json`.
+
 ## `.mpx/kanbanflow.json`
 
-Written by `kf init` and **committed** — column IDs are not secrets, and the canonical-state mapping
-is what keeps the `kf-` skills board-agnostic. Unmapped states are omitted.
+Written by `kf init` and **committed**: it holds board facts only — no token, no user — so every
+teammate gets the same column mapping from a fresh clone. Column IDs are not secrets, and the
+canonical-state mapping is what keeps the `kf-` skills board-agnostic. Unmapped states are omitted.
 
 ```json
 {
   "boardId": "F2QMK1B",
   "boardName": "My first board",
-  "userId": "UHJ9JgtA",
   "states": {
     "todo": "C0LIn5sEEpqT",
     "wip": "C9LIn5sEEpqT",
     "done": "CqL5n5sEEpqT"
   }
 }
+```
+
+Track the whole `.mpx/` directory; ignore only its scratch area:
+
+```gitignore
+.mpx/tmp/
 ```
 
 ## Agent contract

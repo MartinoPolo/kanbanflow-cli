@@ -1,9 +1,15 @@
-//! User-level registry of the boards a token has been stored for.
+//! User-level registry of the boards a token has been stored for, and of who
+//! this machine's user is on each of them.
 //!
 //! Holds no secrets: the tokens stay in the OS credential store, which cannot
 //! be enumerated portably. This file remembers the board IDs to look them up
 //! by, so authenticating once is enough — `kf init` in a fresh repo reuses the
 //! stored token instead of asking for it a second time.
+//!
+//! The acting user lives here rather than in the repo's `kanbanflow.json`
+//! because that file is committed and shared: a teammate who cloned a config
+//! carrying someone else's `userId` would have `--mine` list that person's
+//! tasks and the guardrail protect the wrong ones.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +24,11 @@ pub const REGISTRY_FILE_NAME: &str = "boards.json";
 pub struct KnownBoard {
     pub id: String,
     pub name: String,
+    /// The board user this machine acts as. Absent for an entry written before
+    /// the identity moved out of the repo config, and for a board reached only
+    /// through `KANBANFLOW_TOKEN`.
+    #[serde(rename = "userId", default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 impl std::fmt::Display for KnownBoard {
@@ -34,23 +45,43 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Add a board, or refresh the name of one already listed. Returns whether
-    /// anything changed, so an unchanged registry is not rewritten.
-    pub fn upsert(&mut self, id: &str, name: &str) -> bool {
+    /// Add a board, or refresh the name and user of one already listed. Returns
+    /// whether anything changed, so an unchanged registry is not rewritten.
+    ///
+    /// A `user_id` of `None` leaves a recorded identity in place: a command that
+    /// merely re-verified the token must not make the machine forget who it is.
+    pub fn upsert(&mut self, id: &str, name: &str, user_id: Option<&str>) -> bool {
         match self.boards.iter_mut().find(|board| board.id == id) {
-            Some(board) if board.name == name => false,
             Some(board) => {
-                board.name = name.to_string();
-                true
+                let renamed = board.name != name;
+                let reidentified =
+                    user_id.is_some_and(|user_id| board.user_id.as_deref() != Some(user_id));
+                if renamed {
+                    board.name = name.to_string();
+                }
+                if reidentified {
+                    board.user_id = user_id.map(str::to_string);
+                }
+                renamed || reidentified
             }
             None => {
                 self.boards.push(KnownBoard {
                     id: id.to_string(),
                     name: name.to_string(),
+                    user_id: user_id.map(str::to_string),
                 });
                 true
             }
         }
+    }
+
+    /// The board user this machine acts as, if it has been recorded.
+    pub fn user_id(&self, board_id: &str) -> Option<&str> {
+        self.boards
+            .iter()
+            .find(|board| board.id == board_id)?
+            .user_id
+            .as_deref()
     }
 
     /// Drop a board. Returns whether it was listed, so a caller can tell
@@ -149,13 +180,13 @@ fn writable_path() -> std::io::Result<PathBuf> {
     })
 }
 
-/// Record a board whose token is in the credential store. Failing to write is
-/// reported to the caller, which warns — the token is already stored, so the
-/// command itself has succeeded.
-pub fn remember(id: &str, name: &str) -> std::io::Result<()> {
+/// Record a board and, when known, the user this machine acts as on it.
+/// Failing to write is reported to the caller, which warns — the token is
+/// already stored, so the command itself has succeeded.
+pub fn remember(id: &str, name: &str, user_id: Option<&str>) -> std::io::Result<()> {
     let path = writable_path()?;
     let mut registry = load_from(&path).unwrap_or_default();
-    if registry.upsert(id, name) {
+    if registry.upsert(id, name, user_id) {
         registry.save_to(&path)?;
     }
     Ok(())
@@ -185,10 +216,12 @@ mod tests {
                 KnownBoard {
                     id: "jZqpF4H".to_string(),
                     name: "Team E".to_string(),
+                    user_id: Some("VrvR3H".to_string()),
                 },
                 KnownBoard {
                     id: "F2QMK1B".to_string(),
                     name: "My first board".to_string(),
+                    user_id: None,
                 },
             ],
         }
@@ -197,14 +230,36 @@ mod tests {
     #[test]
     fn upsert_adds_a_board_once_and_refreshes_a_renamed_one() {
         let mut registry = registry();
-        assert!(!registry.upsert("jZqpF4H", "Team E"), "no change to save");
+        assert!(
+            !registry.upsert("jZqpF4H", "Team E", Some("VrvR3H")),
+            "no change to save"
+        );
         assert_eq!(registry.boards.len(), 2);
 
-        assert!(registry.upsert("jZqpF4H", "Team Europe"), "rename");
+        assert!(registry.upsert("jZqpF4H", "Team Europe", None), "rename");
         assert_eq!(registry.boards[0].name, "Team Europe");
 
-        assert!(registry.upsert("B3new", "Third"), "new board");
+        assert!(registry.upsert("B3new", "Third", None), "new board");
         assert_eq!(registry.boards.len(), 3);
+    }
+
+    /// Re-verifying a token says nothing about who we are, so it must not erase
+    /// an identity that `kf auth login` or `kf init` already recorded.
+    #[test]
+    fn upsert_records_a_user_and_never_clears_one() {
+        let mut registry = registry();
+        assert!(!registry.upsert("jZqpF4H", "Team E", None), "no change");
+        assert_eq!(registry.user_id("jZqpF4H"), Some("VrvR3H"));
+
+        assert!(
+            registry.upsert("jZqpF4H", "Team E", Some("Uother")),
+            "switch"
+        );
+        assert_eq!(registry.user_id("jZqpF4H"), Some("Uother"));
+
+        assert!(registry.upsert("F2QMK1B", "My first board", Some("UHJ9JgtA")));
+        assert_eq!(registry.user_id("F2QMK1B"), Some("UHJ9JgtA"));
+        assert_eq!(registry.user_id("never-seen"), None);
     }
 
     #[test]

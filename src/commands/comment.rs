@@ -121,7 +121,7 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     // The comment payload carries only author IDs; names cost one extra request,
     // which `UserNames` spends lazily — an empty listing spends nothing. Authors
     // are shown by name even when they are us: `me` would hide who wrote what.
-    let mut authors = UserNames::without_me(&context.client);
+    let mut authors = UserNames::new(&context.client, None);
     let mut table = Table::new(&["ID", "AUTHOR", "CREATED", "TEXT"]);
     for comment in &comments {
         let author = comment
@@ -143,7 +143,7 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
 fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     let text = comment_text(args.text, args.file)?;
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("editing a comment on task {}", task.reference()))?;
 
     context
@@ -160,7 +160,7 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("deleting a comment on task {}", task.reference()))?;
 
     if !args.yes

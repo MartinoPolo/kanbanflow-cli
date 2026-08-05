@@ -76,7 +76,7 @@ pub fn run(command: SubtaskCommand) -> anyhow::Result<()> {
 
 fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("adding a subtask to task {}", task.reference()))?;
 
     let payload = SubTaskPayload {
@@ -119,7 +119,7 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
 
 fn set_finished(context: &Context, args: CheckArgs, finished: bool) -> anyhow::Result<()> {
     let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id(), args.force)
+    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
         .with_context(|| format!("changing a subtask of task {}", task.reference()))?;
 
     let index = find_subtask(&task.sub_tasks, &args.subtask)
