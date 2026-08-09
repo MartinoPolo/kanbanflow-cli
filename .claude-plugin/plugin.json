@@ -1,0 +1,8 @@
+{
+  "name": "kf",
+  "version": "0.1.0",
+  "description": "KanbanFlow + GitLab work-stack: task lifecycle skills around the kf CLI, execution orchestrators, and glab MR workflow. Skills invoke as /kf:<name>.",
+  "author": {
+    "name": "MartinoPolo"
+  }
+}
