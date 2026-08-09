@@ -1,5 +1,5 @@
 ---
-name: kf-task-view
+name: task-view
 description: "Reads a KanbanFlow task in full — description, subtasks, comments and attached images — before working on it."
 when_to_use: "User references a task number (E613), asks what a task says, or asks you to start work on a KanbanFlow task and you need its content first."
 argument-hint: "<task-number>"
@@ -70,5 +70,5 @@ Summarize before touching code:
 - Anything the comments changed relative to the description.
 - Open questions or contradictions → surface them, do not guess.
 
-If the human wants to start work now, hand off to `kf-task-edit` (which uses
+If the human wants to start work now, hand off to `/kf:task-edit` (which uses
 `kf task grab` — that command re-reads the aggregate itself, so skip Step 1 in that case).

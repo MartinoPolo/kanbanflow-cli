@@ -1,12 +1,12 @@
 ---
-name: kf-task-edit
+name: task-edit
 description: "Updates a KanbanFlow task during and after work: grab, append notes, comment, move between states, finish."
 when_to_use: "User starts work on a task, wants to record progress on it, opens or merges an MR for it, or asks to move, reassign, relabel or close a KanbanFlow task."
 argument-hint: "<task-number> [grab|note|comment|move <state>|finish]"
 allowed-tools: Bash(kf task grab*), Bash(kf task finish*), Bash(kf task edit*), Bash(kf task move*), Bash(kf comment add*), Bash(kf subtask*), Bash(kf attach add*), Read, Write
 metadata:
   author: MartinoPolo
-  version: "1.0"
+  version: "1.1"
   category: ticketing
 ---
 
@@ -36,8 +36,8 @@ Fire these from the host repo's `glab` workflow. One command per event, no polli
 | Event | Command |
 | --- | --- |
 | Work starts on the task | `kf task grab <ref> --download-dir .mpx/tmp/<ref> --json` |
-| Merge request opened | `kf task move <ref> --to review` |
-| Merge request merged | `kf task finish <ref> --comment-file <file> --check-subtasks` |
+| Merge request opened | `kf comment add <ref> --text "MR: <url>"` — the task **stays in `wip`**; the human moves it to `review` after checking the work ([KF_WORKFLOW.md](../shared/KF_WORKFLOW.md)) |
+| Merge request merged — only when the human says so | `kf task finish <ref> --comment-file <file> --check-subtasks` |
 | Work parked / handed back | `kf task move <ref> --to todo` and `kf task edit <ref> --responsible none` |
 
 ## Start of work: grab

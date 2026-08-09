@@ -155,6 +155,41 @@ follows the API's continuation cursor, so `task list`, `task view E613`, `label 
 `board --counts` see the whole column; the extra requests are spent only on columns that report the
 truncation.
 
+## Claude Code plugin
+
+This repo doubles as a Claude Code plugin named `kf`: the KanbanFlow + GitLab work-stack skills
+that drive the `kf` CLI from an agent session. Load it by pointing Claude Code at this repo — the
+flag is repeatable, so it stacks with other plugins:
+
+```bash
+claude --plugin-dir /path/to/kanbanflow-cli
+```
+
+Skills then invoke as `/kf:<name>`:
+
+| Skill | What it does |
+| --- | --- |
+| `/kf:task-create` | Compose a well-formed task from the session context and file it after human approval |
+| `/kf:task-view` | Read a task in full — description, subtasks, comments, attached images — in as few API calls as possible |
+| `/kf:task-edit` | Grab, note, comment, move, relabel and finish a task as the work happens |
+| `/kf:task-grill` | Resolve a HITL task into an AFK-ready one by settling its open decisions with the human |
+| `/kf:execute` | Take one AFK task to a draft GitLab MR with a green pipeline, in its own worktree |
+| `/kf:batch-execute` | Run the execute flow over several AFK tasks sequentially, each fully isolated |
+| `/kf:mr` | Push the branch and open or update its GitLab merge request as a draft via `glab` |
+
+**Requirements**
+
+- The `kf` binary on PATH — `cargo install --path .` from this repo (see [Install](#install)).
+- A KanbanFlow token, via the `KANBANFLOW_TOKEN` environment variable or the OS keyring
+  (`kf auth login`). See [Authentication](#authentication).
+- A per-repo `.mpx/kanbanflow.json` in each project the skills run against — `kf init` writes it.
+- `/kf:execute`, `/kf:batch-execute` and `/kf:mr` additionally need `glab` authenticated against
+  the project's GitLab host.
+
+The execution skills reference the `mp` plugin's `/mp:commit` skill and a set of `mp:mp-*`
+sub-agents. Load the `mp` plugin alongside (another `--plugin-dir`) to get them; without it, the
+skills fall back to running those phases in the main thread.
+
 ## Repo layout
 
 | Path | Purpose |
@@ -163,7 +198,8 @@ truncation.
 | `docs/COMMANDS.md` | Full command and flag reference |
 | `docs/api/` | Vendored snapshot of the KanbanFlow API documentation |
 | `scripts/scrape-docs.mjs` | Refreshes `docs/api/` from the live documentation site |
-| `skills/` | `kf-` prefixed Claude Code skills for agent-driven usage |
+| `.claude-plugin/plugin.json` | Manifest for the `kf` Claude Code plugin |
+| `skills/` | The `kf` plugin's skills, invoked as `/kf:<name>` (see above) |
 
 Refresh the vendored API docs with:
 
