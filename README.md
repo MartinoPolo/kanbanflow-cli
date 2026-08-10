@@ -109,6 +109,10 @@ Written by `kf init` and **committed**: it holds board facts only — no token, 
 teammate gets the same column mapping from a fresh clone. Column IDs are not secrets, and the
 canonical-state mapping is what keeps the `kf-` skills board-agnostic. Unmapped states are omitted.
 
+An optional `"vcs"` key names the system hosting the repo's merge requests (absent means
+`gitlab`). The CLI never interprets it — it belongs to the `/kf:board-sync` skill, which reads it
+to pick its evidence provider — but `kf init --overwrite` preserves it.
+
 ```json
 {
   "boardId": "F2QMK1B",
@@ -176,6 +180,7 @@ Skills then invoke as `/kf:<name>`:
 | `/kf:execute` | Take one AFK task to a draft GitLab MR with a green pipeline, in its own worktree |
 | `/kf:batch-execute` | Run the execute flow over several AFK tasks sequentially, each fully isolated |
 | `/kf:mr` | Push the branch and open or update its GitLab merge request as a draft via `glab` |
+| `/kf:board-sync` | Reconcile the board with reality: move tasks forward to match their MR state (draft → `wip`, ready → `review`, merged → `done`) and local branches |
 
 **Requirements**
 

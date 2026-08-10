@@ -157,6 +157,11 @@ pub struct Config {
     /// an older `kf init` keep working; never written again.
     #[serde(rename = "userId", default, skip_serializing_if = "Option::is_none")]
     pub legacy_user_id: Option<String>,
+    /// Which VCS hosts this repo's merge requests (`"gitlab"` when absent).
+    /// The CLI never interprets it — it exists for the `board-sync` skill and
+    /// is carried here only so `kf init --overwrite` does not drop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<String>,
     pub states: StateColumns,
 }
 
@@ -254,6 +259,7 @@ mod tests {
             board_id: "F2QMK1B".to_string(),
             board_name: "My first board".to_string(),
             legacy_user_id: None,
+            vcs: None,
             states: StateColumns {
                 todo: Some("C9LIn5sEEpqT".to_string()),
                 wip: Some("CBO1VNGqDc4K".to_string()),
@@ -281,6 +287,18 @@ mod tests {
             json,
             r#"{"boardId":"F2QMK1B","boardName":"My first board","states":{"todo":"C9LIn5sEEpqT","wip":"CBO1VNGqDc4K","done":"COxkPjd0wra4"}}"#
         );
+    }
+
+    /// The `vcs` key belongs to the skills, not the CLI: it must survive a
+    /// serialize round-trip so `kf init --overwrite` cannot drop it.
+    #[test]
+    fn the_vcs_key_round_trips() {
+        let mut config = sample();
+        config.vcs = Some("gitlab".to_string());
+        let json = serde_json::to_string(&config).expect("serializable");
+        assert!(json.contains(r#""vcs":"gitlab""#));
+        let parsed: Config = serde_json::from_str(&json).expect("deserializable");
+        assert_eq!(parsed.vcs.as_deref(), Some("gitlab"));
     }
 
     /// A config written by an older `kf init` still parses, and its `userId`

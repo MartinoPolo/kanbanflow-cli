@@ -1072,6 +1072,7 @@ mod tests {
             board_id: "F2QMK1B".to_string(),
             board_name: "My first board".to_string(),
             legacy_user_id: None,
+            vcs: None,
             states: StateColumns {
                 todo: Some("CTODO".to_string()),
                 wip: Some("CWIP".to_string()),

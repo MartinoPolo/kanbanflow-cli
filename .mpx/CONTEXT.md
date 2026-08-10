@@ -45,7 +45,7 @@ _Avoid_: "issue" for Task (GitHub vocabulary), "swimlane" (work board has none),
 - Attachment download links expire (`linkExpiresTimestamp`, ~24h); download immediately, never store links.
 - `GET /tasks/<id>` returns subtasks/labels/custom fields inline but never comments or attachments — a full task read is 3 API calls (task, comments, attachments). Verified 2026-07-31 on sandbox.
 - No secrets in the repo — token via Credential Manager or `KANBANFLOW_TOKEN` only.
-- Work board pairs with GitLab (`gitlab.verotel.cz`); auto-move triggers fire from `glab` MR events in skills, not webhooks.
+- Work board pairs with GitLab (`gitlab.com`, group `bitsafe`); auto-move triggers fire from `glab` MR events in skills, not webhooks.
 - `--json` on every read command; meaningful exit codes — the agent contract.
 - Sandbox for development: personal board `F2QMK1B` ("My first board", 14-day trial started 2026-07-31), columns To-do / Do today / In progress / Done.
 - API docs snapshot lives in `docs/api/` (57 pages); refresh with `node scripts/scrape-docs.mjs docs/api`.

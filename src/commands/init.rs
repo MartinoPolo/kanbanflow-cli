@@ -90,6 +90,8 @@ pub fn run(args: InitArgs) -> anyhow::Result<()> {
         board_id: board.id.clone(),
         board_name: board.name.clone(),
         legacy_user_id: None,
+        // Skill-owned key: preserved across re-init, never set by the CLI.
+        vcs: existing.and_then(|previous| previous.vcs),
         states,
     };
     config.save_to(&target_path)?;
