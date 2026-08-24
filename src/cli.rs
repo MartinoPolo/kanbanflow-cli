@@ -29,22 +29,22 @@ pub enum Commands {
         #[command(subcommand)]
         command: commands::auth::AuthCommand,
     },
-    /// Create, read and change tasks.
-    Task {
+    /// Create, read and change issues.
+    Issue {
         #[command(subcommand)]
-        command: commands::task::TaskCommand,
+        command: commands::issue::IssueCommand,
     },
-    /// Attach files to tasks and download them again.
+    /// Attach files to issues and download them again.
     Attach {
         #[command(subcommand)]
         command: commands::attach::AttachCommand,
     },
-    /// Read and write task comments.
+    /// Read and write issue comments.
     Comment {
         #[command(subcommand)]
         command: commands::comment::CommentCommand,
     },
-    /// Manage a task's checklist items.
+    /// Manage an issue's checklist items.
     Subtask {
         #[command(subcommand)]
         command: commands::subtask::SubtaskCommand,
@@ -64,7 +64,7 @@ impl Cli {
         match self.command {
             Commands::Init(args) => commands::init::run(args),
             Commands::Auth { command } => commands::auth::run(command),
-            Commands::Task { command } => commands::task::run(command),
+            Commands::Issue { command } => commands::issue::run(command),
             Commands::Attach { command } => commands::attach::run(command),
             Commands::Comment { command } => commands::comment::run(command),
             Commands::Subtask { command } => commands::subtask::run(command),
@@ -76,12 +76,18 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     use super::Cli;
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn public_noun_is_issue_without_legacy_alias() {
+        assert!(Cli::try_parse_from(["kf", "issue", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["kf", "task", "list"]).is_err());
     }
 }

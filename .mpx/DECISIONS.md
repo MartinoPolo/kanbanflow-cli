@@ -1,112 +1,61 @@
 # DECISIONS
 
-## Platform & Infrastructure
+## Platform and Infrastructure
 
-### Rust with clap + reqwest + serde + keyring
+### Rust with clap, reqwest, serde, and keyring
 
-Decided: 2026-07-31
-What: The CLI is Rust; `clap` for commands, `reqwest` for HTTP, `serde` for JSON, `keyring` for token storage.
-Why: Single static binary with ~5ms startup fits "one-shot it and it just works"; `keyring` gives Windows Credential Manager for free; author steers, agents write all code.
-Rejected: TypeScript/Node (runtime dependency, ~80ms startup per agent call); Go (equally viable, lost on token-storage story and author's Rust curiosity).
+The CLI is Rust. `clap` defines commands, `reqwest` handles HTTP, `serde` handles JSON, and `keyring` stores tokens in the operating-system credential store. This keeps startup fast and distribution self-contained.
 
-### Distribution via GitHub releases with cargo-dist
+### Binary named `kf`
 
-Decided: 2026-07-31
-What: Private GitHub repo `kanbanflow-cli` under the personal account; `cargo-dist` generates installers when publishing becomes desirable.
-Why: Zero publishing effort now, one-command path to shell/PowerShell installers, npm shim, and Homebrew tap later.
-Rejected: npm-first distribution (ties binary to Node); publishing publicly at v0 (premature).
+The binary uses `gh`-style `kf <noun> <verb>` grammar. The public work-item noun is `issue`, with commands under `kf issue`.
 
-### Binary named kf, repo named kanbanflow-cli
+### Vendored API documentation
 
-Decided: 2026-07-31
-What: Two-letter binary `kf`, gh-style grammar `kf <noun> <verb>` with KanbanFlow nouns (`task`, not `issue`).
-Why: Matches `gh`/`glab` muscle memory for agents and human; honest domain vocabulary.
-Rejected: `kbf`/`kanban` (longer, no clarity gained); mimicking gh's `issue` noun (pretends wrong domain).
-
-### API docs vendored as Markdown with a repeatable scraper
-
-Decided: 2026-07-31
-What: All 57 pages of kanbanflow.com/api-docs scraped to `docs/api/*.md`; scraper (`scripts/scrape-docs.mjs`, Node + turndown) committed for refreshes.
-Why: Docs are server-rendered static HTML, trivially scrapable; a local snapshot makes agent-driven maintenance self-contained.
-Rejected: Scrape-on-demand (needless network dependency; docs rarely change).
+The upstream API documentation is stored in `docs/api/` and refreshed by `scripts/scrape-docs.mjs`. This keeps wire-contract maintenance reproducible without making routine development depend on the live documentation site.
 
 ## CLI Design
 
-### Tasks referenced by board number, IDs accepted
+### Issues accept board numbers and internal IDs
 
-Decided: 2026-07-31
-What: Commands take `E613`-style task numbers (resolved via get-tasks) or raw task IDs interchangeably.
-Why: Numbers are what humans and the board UI show; the API's `number` object (`{prefix, value}`) makes resolution reliable.
-Rejected: ID-only interface (unusable for humans reading the board).
+Commands accept an `E613`-style issue number or an internal ID. Numbers match what people see on the board; IDs remain useful for automation.
 
-### Canonical workflow states mapped per-board in .mpx/kanbanflow.json
+### Public issue vocabulary, scoped wire vocabulary
 
-Decided: 2026-07-31
-What: `kf task move --to todo|wip|review|done|archive` resolves through a committed per-repo mapping written by `kf init`; column IDs are not secrets.
-Why: Skills and agents stay portable across boards with different column names; auto-move triggers (start work → wip, MR open → review, MR merged → done) live in skills.
-Rejected: Raw column names/IDs in every call (brittle, board-specific); webhooks for auto-move (needs a 24/7 public listener; a CLI cannot receive them).
+Public prose, modules, and commands use Issue and `kf issue`. KanbanFlow's upstream wire vocabulary remains unchanged only in API models, payloads, serde fields, and vendored API documentation.
 
-### Acting user lives in the user-level registry, not in the committed config
+### Canonical workflow states live in the root project config
 
-Decided: 2026-08-05
-What: `.mpx/kanbanflow.json` holds board facts only. Which board member `kf` acts as is settled once per board at `kf auth login` (or the first `kf init`), stored in `boards.json` beside the token, overridable with `KANBANFLOW_USER_ID`. A `userId` in an older config is still read, last, for compatibility.
-Why: The file is committed so the team shares one column mapping, but the acting user differs per teammate — a cloned `userId` made `--mine` list its author's tasks and pointed the guardrail at the wrong cards. A KanbanFlow token is per board and the API has no "who am I" endpoint, so identity is a choice and cannot be derived.
-Rejected: Gitignoring the whole config (loses the shared mapping that is the file's reason to exist); keeping `userId` and having each teammate re-run `kf init` (a merge conflict on every clone, and silently wrong until someone notices).
+`kf issue move --to todo|wip|review|done|archive` resolves through the `issues.states` mapping in root `mpxconfig.json`. `todo`, `wip`, `review`, and `done` are required; `archive` is optional. Every mapped state uses a distinct column so reverse lookup is unambiguous.
 
-### `.mpx/` is tracked; only `.mpx/tmp/` is ignored
+### Init updates an existing manifest only
 
-Decided: 2026-08-05
-What: Repos commit `.mpx/` — `CONTEXT.md`, `DECISIONS.md`, `kanbanflow.json` — and gitignore `.mpx/tmp/`, the scratch area the `kf-` skills download attachments into.
-Why: The directory's contents are now all team-shared by construction; one namespace tracked or ignored as a unit beats a root dotfile plus a separate scratch directory, and the skills already write scratch under `.mpx/tmp/`.
-Rejected: A root `.kanbanflow.json` (a rename touching config, init, skills and docs for no functional gain); gitignoring all of `.mpx/` (would drop the shared column mapping and the decision log).
+`kf init` requires a pre-existing valid root `mpxconfig.json`. It replaces only the `issues` binding while preserving project, repository, tooling, unknown fields, and all other unrelated root configuration. It never creates a new manifest.
 
-### Token in Windows Credential Manager, env var override
+The shared file is updated through a sibling temporary file and rename so a failed write cannot truncate unrelated project configuration.
 
-Decided: 2026-07-31
-What: `kf auth login` stores the per-board token via `keyring`; `KANBANFLOW_TOKEN` overrides for dev/CI; nothing token-shaped ever in files.
-Why: Shared-board credentials deserve OS-level storage; env override keeps agents and CI simple.
-Rejected: Config-file token (leak risk in a repo-adjacent file); env-only (no persistence across shells).
+### Acting identity is user-level only
 
-### Shared-board guardrails on by default
+Which board member `kf` acts as is stored in the user-level board registry, with `KANBANFLOW_USER_ID` as the environment override. The committed `issues` binding contains no identity. There is no fallback to `.mpx/kanbanflow.json` and no fallback to a legacy `userId` field.
 
-Decided: 2026-07-31
-What: Refuse to move/edit/delete a task whose responsible user isn't the token's user unless `--force`; never create labels implicitly.
-Why: Team E is a shared board with 17 members; agent mistakes must not disturb teammates' cards.
-Rejected: Trust-the-agent default (one bad loop spams the whole team).
+### Token storage
 
-### Agent output contract: --json everywhere, human tables by default
+Tokens live in the OS credential store, with `KANBANFLOW_TOKEN` as an override. No token is written to project files.
 
-Decided: 2026-07-31
-What: Every read command supports `--json`; write commands return the affected task number/ID; `view --download-attachments <dir>` saves images for agents to Read.
-Why: Mirrors the `gh --json` contract agents already script against; the download flag turns image-reading into one step.
-Rejected: JSON-only output (hostile to the human half of the workflow).
+### Shared-board guardrails
 
-### Compound workflow commands over agent orchestration
+Mutations of an issue that is not yours are refused unless the human explicitly supplies `--force`. Responsible users and collaborators count as owners for normal mutations; grabbing remains stricter because it reassigns responsibility. Labels are never created implicitly.
 
-Decided: 2026-07-31
-What: First-class compound commands collapse multi-step agent dances: `kf task grab` (assign me + move to WIP + aggregated view + image downloads), `kf task finish` (comment from file + move + optional subtask check-off), `view` aggregating task+comments+attachments (the API forces 3 calls), `create --attach` (create + uploads + label validation), `edit --append-description` (lossless server-side merge).
-Why: Every scripted step replaces an agentic step — deterministic, cheaper, faster; skills shrink to composing content and running one command.
-Rejected: `kf next` (picking policy belongs in skills; CLI stays mechanical); `link-mr` and `watch` commands (no demonstrated need); leaving orchestration to agents (the pain this project exists to remove).
+### Agent output contract
 
-## Scope & Integration
+Every read command supports `--json`; human-readable tables remain the default. Aggregate issue views can download image attachments for agents to inspect.
 
-### v1 scope: tasks, attachments, comments, subtasks, labels-read, board, init, auth
+### Compound workflow commands
 
-Decided: 2026-07-31
-What: In v1: full task CRUD + move, attachment round-trip, comments, subtasks, `label list`, `board`, `init`, `auth login`. Out: hierarchy/relations, time tracking, webhooks, move-between-boards, custom fields.
-Why: Covers everything observed in real Team E usage (subtask checklists included); work team uses no PRD/sub-issue hierarchy.
-Rejected: Time tracking (author doesn't use it); webhooks (see auto-move decision); custom fields (deferred until work token reveals actual fields).
+`kf issue grab` combines assignment, movement to `wip`, and an aggregate view. `kf issue finish` can add a closing comment, check subtasks, and move the issue. These deterministic commands replace fragile multi-command agent orchestration.
 
-### Dedicated kf- skills instead of provider-switching existing skills
+## Scope and Integration
 
-Decided: 2026-07-31
-What: New `kf-task-create`, `kf-task-view`, `kf-task-edit` skills live in this repo under `skills/` and get symlinked into projects that use KanbanFlow.
-Why: Work environment needs only a small skill set; symlink selection replaces any `MPX_TICKETING` switching variable; existing 13 gh-hardcoded skills stay untouched.
-Rejected: Conditional branches in existing skills (13 mechanical edits, ongoing dual-path maintenance); a gh-compatible facade (GitHub concepts don't map 1:1).
+The implemented surface covers issues, attachments, comments, subtasks, label reads, board metadata, initialization, and authentication. Time tracking, webhooks, cross-board movement, and custom fields remain outside the current scope.
 
-### KanbanFlow CLI replaces the Obsidian board workaround
-
-Decided: 2026-07-31
-What: For KanbanFlow projects, images attach to tasks directly; the `.mpx/BOARD.md` + vault-junction pattern from BOARD_CONVENTION.md is not used.
-Why: The workaround existed only because gh cannot round-trip images; the KanbanFlow API can.
-Rejected: Running both systems side by side (duplicate state, two sources of truth).
+The plugin skills use the same Issue and `kf issue` vocabulary as the CLI. `.mpx/` contains project context, decisions, and ignored scratch downloads; it does not contain board configuration.

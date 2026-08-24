@@ -1,7 +1,7 @@
 //! The board's label vocabulary.
 //!
 //! The API has no board-level label endpoint (`GET /tasks/<id>/labels` is
-//! per-task), so the vocabulary is the union of the labels carried by the tasks
+//! per-issue), so the vocabulary is the union of the labels carried by the issues
 //! one `GET /tasks` returns. Labels are never created implicitly, so that union
 //! is also exactly the set a command may apply.
 
@@ -9,34 +9,34 @@ use std::collections::BTreeMap;
 
 use anyhow::Context as _;
 
-use crate::api::models::{Label, TaskGroup};
+use crate::api::models::{IssueGroup, Label};
 use crate::api::Client;
-use crate::tasks;
+use crate::issues;
 
-/// How often a label name occurs, and whether any task pins it.
+/// How often a label name occurs, and whether any issue pins it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LabelUsage {
-    pub task_count: usize,
+    pub issue_count: usize,
     pub pinned: bool,
 }
 
-/// Every task on the board, with the context string every label read shares.
+/// Every issue on the board, with the context string every label read shares.
 /// Truncated date-grouped cells are paged through, so a label used only by an
-/// old Done task still counts.
-pub fn fetch_groups(client: &Client) -> anyhow::Result<Vec<TaskGroup>> {
-    tasks::fetch_all_groups(client).context("listing tasks to collect their labels (GET /tasks)")
+/// old Done issue still counts.
+pub fn fetch_groups(client: &Client) -> anyhow::Result<Vec<IssueGroup>> {
+    issues::fetch_all_groups(client).context("listing issues to collect their labels (GET /tasks)")
 }
 
-/// Distinct label names across every returned task, sorted by name.
-pub fn usage(groups: &[TaskGroup]) -> BTreeMap<String, LabelUsage> {
+/// Distinct label names across every returned issue, sorted by name.
+pub fn usage(groups: &[IssueGroup]) -> BTreeMap<String, LabelUsage> {
     let mut usage: BTreeMap<String, LabelUsage> = BTreeMap::new();
     for label in groups
         .iter()
         .flat_map(|group| &group.tasks)
-        .flat_map(|task| &task.labels)
+        .flat_map(|issue| &issue.labels)
     {
         let entry = usage.entry(label.name.clone()).or_default();
-        entry.task_count += 1;
+        entry.issue_count += 1;
         entry.pinned |= label.pinned.unwrap_or(false);
     }
     usage
@@ -44,7 +44,7 @@ pub fn usage(groups: &[TaskGroup]) -> BTreeMap<String, LabelUsage> {
 
 /// The applicable label names, sorted case-insensitively and deduplicated so a
 /// board that spells one label two ways still offers a single choice.
-pub fn names(groups: &[TaskGroup]) -> Vec<String> {
+pub fn names(groups: &[IssueGroup]) -> Vec<String> {
     let mut names: Vec<String> = usage(groups).into_keys().collect();
     names.sort_by_key(|name| name.to_lowercase());
     names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -91,7 +91,7 @@ pub fn canonicalize(requested: &[String], vocabulary: &[String]) -> anyhow::Resu
 mod tests {
     use super::*;
 
-    fn groups() -> Vec<TaskGroup> {
+    fn groups() -> Vec<IssueGroup> {
         serde_json::from_str(
             r#"[{"columnId":"C0","columnName":"To-do","tasks":[
                 {"_id":"T1","name":"a","columnId":"C0","labels":[{"name":"Priority","pinned":true},{"name":"Project X"}]},
@@ -102,10 +102,10 @@ mod tests {
     }
 
     #[test]
-    fn usage_counts_tasks_and_keeps_pinned_sticky() {
+    fn usage_counts_issues_and_keeps_pinned_sticky() {
         let usage = usage(&groups());
         assert_eq!(usage.len(), 2);
-        assert_eq!(usage["Priority"].task_count, 2);
+        assert_eq!(usage["Priority"].issue_count, 2);
         assert!(usage["Priority"].pinned);
         assert!(!usage["Project X"].pinned);
     }
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn names_are_sorted_case_insensitively_and_deduplicated() {
-        let groups: Vec<TaskGroup> = serde_json::from_str(
+        let groups: Vec<IssueGroup> = serde_json::from_str(
             r#"[{"columnId":"C0","columnName":"To-do","tasks":[
                 {"_id":"T1","name":"a","columnId":"C0","labels":[{"name":"zebra"},{"name":"Apple"},{"name":"APPLE"}]}
             ]}]"#,

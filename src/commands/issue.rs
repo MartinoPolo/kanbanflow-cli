@@ -1,7 +1,7 @@
-//! `kf task` — create, read and change tasks.
+//! `kf issue` — create, read and change issues.
 //!
 //! The compound verbs (`view`, `grab`, `finish`, `create --attach`) exist because
-//! the API forces multi-call dances: a full task read is task + comments +
+//! the API forces multi-call dances: a full issue read is issue + comments +
 //! attachments, and attachment links expire ~24h after they are handed out.
 
 use std::collections::{HashMap, HashSet};
@@ -12,45 +12,45 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::api::models::{
-    Attachment, Comment, CreateComment, CreateCommentResponse, CreateTask, CreateTaskResponse,
-    Label, SubTask, SubTaskPayload, Task, TaskGroup, UpdateTask,
+    Attachment, Comment, CreateComment, CreateCommentResponse, CreateIssue, CreateIssueResponse,
+    Issue, IssueGroup, Label, SubTask, SubTaskPayload, UpdateIssue,
 };
 use crate::api::{ApiError, Client};
 use crate::config::{CanonicalState, Config, ConfigError};
 use crate::context::Context;
 use crate::files::unique_destination;
 use crate::guard;
+use crate::issues;
 use crate::labels;
 use crate::output::{self, Table};
 use crate::prompt::confirm;
 use crate::resolve;
-use crate::tasks;
 use crate::users::UserNames;
 
 #[derive(Debug, Subcommand)]
-pub enum TaskCommand {
-    /// Create a task, optionally uploading attachments in the same step.
+pub enum IssueCommand {
+    /// Create an issue, optionally uploading attachments in the same step.
     Create(CreateArgs),
-    /// Show a task with its comments and attachments.
+    /// Show an issue with its comments and attachments.
     View(ViewArgs),
-    /// List tasks on the board.
+    /// List issues on the board.
     List(ListArgs),
-    /// Change a task's fields.
+    /// Change an issue's fields.
     Edit(EditArgs),
-    /// Move a task to a canonical workflow state.
+    /// Move an issue to a canonical workflow state.
     Move(MoveArgs),
-    /// Delete a task.
+    /// Delete an issue.
     Delete(DeleteArgs),
-    /// Assign the task to yourself, move it to WIP and show it.
+    /// Assign the issue to yourself, move it to WIP and show it.
     Grab(GrabArgs),
     /// Comment, move out of WIP and optionally check off subtasks.
     Finish(FinishArgs),
 }
 
-/// The card colors the API accepts (`docs/api/create-task.md`).
+/// The issue colors the API accepts (`docs/api/create-task.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lowercase")]
-pub enum CardColor {
+pub enum IssueColor {
     Yellow,
     White,
     Red,
@@ -63,35 +63,35 @@ pub enum CardColor {
     Magenta,
 }
 
-impl CardColor {
+impl IssueColor {
     fn as_str(self) -> &'static str {
         match self {
-            CardColor::Yellow => "yellow",
-            CardColor::White => "white",
-            CardColor::Red => "red",
-            CardColor::Green => "green",
-            CardColor::Blue => "blue",
-            CardColor::Purple => "purple",
-            CardColor::Orange => "orange",
-            CardColor::Cyan => "cyan",
-            CardColor::Brown => "brown",
-            CardColor::Magenta => "magenta",
+            IssueColor::Yellow => "yellow",
+            IssueColor::White => "white",
+            IssueColor::Red => "red",
+            IssueColor::Green => "green",
+            IssueColor::Blue => "blue",
+            IssueColor::Purple => "purple",
+            IssueColor::Orange => "orange",
+            IssueColor::Cyan => "cyan",
+            IssueColor::Brown => "brown",
+            IssueColor::Magenta => "magenta",
         }
     }
 }
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Task name.
+    /// Issue name.
     #[arg(long)]
     pub name: String,
-    /// Task description (Markdown, as the board renders it).
+    /// Issue description (Markdown, as the board renders it).
     #[arg(long)]
     pub description: Option<String>,
-    /// Card color.
+    /// Issue color.
     #[arg(long, value_enum, ignore_case = true)]
-    pub color: Option<CardColor>,
-    /// Canonical state (column) to create the task in.
+    pub color: Option<IssueColor>,
+    /// Canonical state (column) to create the issue in.
     #[arg(long, value_enum, ignore_case = true, default_value_t = CanonicalState::Todo)]
     pub to: CanonicalState,
     /// Existing board label to apply; repeatable. Unknown labels are refused.
@@ -100,7 +100,7 @@ pub struct CreateArgs {
     /// Responsible user: `me` or a user ID; defaults to you, pass `none` to leave unassigned.
     #[arg(long)]
     pub responsible: Option<String>,
-    /// File to upload onto the new task; repeatable.
+    /// File to upload onto the new issue; repeatable.
     #[arg(long = "attach", value_name = "FILE")]
     pub attachments: Vec<PathBuf>,
     /// Grouping date (`YYYY-MM-DD`) for date-grouped columns; server defaults to today.
@@ -113,8 +113,8 @@ pub struct CreateArgs {
 
 #[derive(Debug, Args)]
 pub struct ViewArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Save every attachment into this directory (links expire, so do it now).
     #[arg(long, value_name = "DIR")]
     pub download_attachments: Option<PathBuf>,
@@ -125,16 +125,16 @@ pub struct ViewArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Only tasks in this canonical state; repeatable (`--state todo --state wip`).
+    /// Only issues in this canonical state; repeatable (`--state todo --state wip`).
     #[arg(long, value_enum, ignore_case = true)]
     pub state: Vec<CanonicalState>,
-    /// Only tasks in this column, by name or ID (for columns with no canonical state).
+    /// Only issues in this column, by name or ID (for columns with no canonical state).
     #[arg(long, value_name = "NAME_OR_ID", conflicts_with = "state")]
     pub column: Option<String>,
     /// Only open work: every column except the ones mapped to `done` and `archive`.
     #[arg(long, conflicts_with_all = ["state", "column"])]
     pub open: bool,
-    /// Only tasks you are responsible for or a collaborator on.
+    /// Only issues you are responsible for or a collaborator on.
     #[arg(long)]
     pub mine: bool,
     /// Print JSON instead of the human-readable output.
@@ -144,9 +144,9 @@ pub struct ListArgs {
 
 #[derive(Debug, Args)]
 pub struct EditArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
-    /// Replace the task name.
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
+    /// Replace the issue name.
     #[arg(long)]
     pub name: Option<String>,
     /// Replace the description.
@@ -155,9 +155,9 @@ pub struct EditArgs {
     /// Append to the description, separated by a blank line (lossless merge).
     #[arg(long, value_name = "TEXT")]
     pub append_description: Option<String>,
-    /// Card color.
+    /// Issue color.
     #[arg(long, value_enum, ignore_case = true)]
-    pub color: Option<CardColor>,
+    pub color: Option<IssueColor>,
     /// Add an existing board label; repeatable.
     #[arg(long = "add-label", value_name = "NAME")]
     pub add_labels: Vec<String>,
@@ -167,7 +167,7 @@ pub struct EditArgs {
     /// Responsible user: `me`, a user ID, or `none` to clear.
     #[arg(long)]
     pub responsible: Option<String>,
-    /// Mutate a task that is not yours.
+    /// Mutate an issue that is not yours.
     #[arg(long)]
     pub force: bool,
     /// Print JSON instead of the human-readable output.
@@ -177,40 +177,40 @@ pub struct EditArgs {
 
 #[derive(Debug, Args)]
 pub struct MoveArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Target canonical state.
     #[arg(long, value_enum, ignore_case = true)]
     pub to: CanonicalState,
     /// Grouping date (`YYYY-MM-DD`) when the target column is date grouped.
-    /// Omitted, the server files the task under today's UTC date.
+    /// Omitted, the server files the issue under today's UTC date.
     #[arg(long, value_name = "YYYY-MM-DD")]
     pub grouping_date: Option<String>,
-    /// Mutate a task that is not yours.
+    /// Mutate an issue that is not yours.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Skip the confirmation prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Delete a task that is not yours.
+    /// Delete an issue that is not yours.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct GrabArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
-    /// Save the task's image attachments into this directory.
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
+    /// Save the issue's image attachments into this directory.
     #[arg(long, value_name = "DIR")]
     pub download_dir: Option<PathBuf>,
-    /// Grab a task someone else is responsible for.
+    /// Grab an issue someone else is responsible for.
     #[arg(long)]
     pub force: bool,
     /// Print JSON instead of the human-readable output.
@@ -220,8 +220,8 @@ pub struct GrabArgs {
 
 #[derive(Debug, Args)]
 pub struct FinishArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// File whose contents become the closing comment.
     #[arg(long, value_name = "PATH")]
     pub comment_file: Option<PathBuf>,
@@ -231,22 +231,22 @@ pub struct FinishArgs {
     /// Mark every unfinished subtask finished.
     #[arg(long)]
     pub check_subtasks: bool,
-    /// Finish a task that is not yours.
+    /// Finish an issue that is not yours.
     #[arg(long)]
     pub force: bool,
 }
 
-pub fn run(command: TaskCommand) -> anyhow::Result<()> {
+pub fn run(command: IssueCommand) -> anyhow::Result<()> {
     let context = Context::load()?;
     match command {
-        TaskCommand::Create(args) => create(&context, args),
-        TaskCommand::View(args) => view(&context, args),
-        TaskCommand::List(args) => list(&context, args),
-        TaskCommand::Edit(args) => edit(&context, args),
-        TaskCommand::Move(args) => move_task(&context, args),
-        TaskCommand::Delete(args) => delete(&context, args),
-        TaskCommand::Grab(args) => grab(&context, args),
-        TaskCommand::Finish(args) => finish(&context, args),
+        IssueCommand::Create(args) => create(&context, args),
+        IssueCommand::View(args) => view(&context, args),
+        IssueCommand::List(args) => list(&context, args),
+        IssueCommand::Edit(args) => edit(&context, args),
+        IssueCommand::Move(args) => move_issue(&context, args),
+        IssueCommand::Delete(args) => delete(&context, args),
+        IssueCommand::Grab(args) => grab(&context, args),
+        IssueCommand::Finish(args) => finish(&context, args),
     }
 }
 
@@ -267,8 +267,8 @@ struct UploadOutcome {
 
 #[derive(Debug, Serialize)]
 struct CreateOutcome {
-    #[serde(rename = "taskId")]
-    task_id: String,
+    #[serde(rename = "issueId")]
+    issue_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     number: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -287,7 +287,7 @@ fn create(context: &Context, args: CreateArgs) -> anyhow::Result<()> {
         ensure_iso_date(date)?;
     }
 
-    let payload = CreateTask {
+    let payload = CreateIssue {
         name: args.name,
         column_id,
         description: args.description,
@@ -300,18 +300,18 @@ fn create(context: &Context, args: CreateArgs) -> anyhow::Result<()> {
         labels,
         ..Default::default()
     };
-    let created: CreateTaskResponse = context
+    let created: CreateIssueResponse = context
         .client
         .post_json("tasks", &payload)
-        .context("creating the task")?;
+        .context("creating the issue")?;
 
     let number = created.number.as_ref().map(ToString::to_string);
-    // The task exists from here on: an upload failure is reported, never fatal.
+    // The issue exists from here on: an upload failure is reported, never fatal.
     let uploads = upload_attachments(&context.client, &created.task_id, &args.attachments);
 
     if args.json {
         output::print_json(&CreateOutcome {
-            task_id: created.task_id,
+            issue_id: created.task_id,
             number,
             attachments: uploads,
         })?;
@@ -328,11 +328,11 @@ fn create(context: &Context, args: CreateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn upload_attachments(client: &Client, task_id: &str, files: &[PathBuf]) -> Vec<UploadOutcome> {
+fn upload_attachments(client: &Client, issue_id: &str, files: &[PathBuf]) -> Vec<UploadOutcome> {
     files
         .iter()
         .map(|file| {
-            let path = format!("tasks/{task_id}/attachments");
+            let path = format!("tasks/{issue_id}/attachments");
             match client.upload_file::<crate::api::models::AddAttachmentResponse>(&path, file) {
                 Ok(response) => UploadOutcome {
                     file: file.display().to_string(),
@@ -355,28 +355,28 @@ fn upload_attachments(client: &Client, task_id: &str, files: &[PathBuf]) -> Vec<
 // view
 // ---------------------------------------------------------------------------
 
-/// The three calls a full task read costs, as one `--json` object.
+/// The three calls a full issue read costs, as one `--json` object.
 #[derive(Debug, Serialize)]
-struct TaskAggregate {
-    task: Task,
+struct IssueAggregate {
+    issue: Issue,
     comments: Vec<Comment>,
     attachments: Vec<Attachment>,
 }
 
-fn fetch_aggregate(client: &Client, task: Task) -> Result<TaskAggregate, ApiError> {
-    let comments = client.get_json(&format!("tasks/{}/comments", task.id), &[])?;
-    let attachments = client.get_json(&format!("tasks/{}/attachments", task.id), &[])?;
-    Ok(TaskAggregate {
-        task,
+fn fetch_aggregate(client: &Client, issue: Issue) -> Result<IssueAggregate, ApiError> {
+    let comments = client.get_json(&format!("tasks/{}/comments", issue.id), &[])?;
+    let attachments = client.get_json(&format!("tasks/{}/attachments", issue.id), &[])?;
+    Ok(IssueAggregate {
+        issue,
         comments,
         attachments,
     })
 }
 
 fn view(context: &Context, args: ViewArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    let aggregate = fetch_aggregate(&context.client, task)
-        .with_context(|| format!("reading task {}", args.task))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    let aggregate = fetch_aggregate(&context.client, issue)
+        .with_context(|| format!("reading issue {}", args.issue))?;
 
     if let Some(directory) = &args.download_attachments {
         let saved =
@@ -396,50 +396,51 @@ fn view(context: &Context, args: ViewArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_aggregate(aggregate: &TaskAggregate, config: &Config, users: &mut UserNames<'_>) {
-    let task = &aggregate.task;
-    println!("{}  {}", task.reference(), task.name);
+fn print_aggregate(aggregate: &IssueAggregate, config: &Config, users: &mut UserNames<'_>) {
+    let issue = &aggregate.issue;
+    println!("{}  {}", issue.reference(), issue.name);
     println!(
         "State:         {}",
-        describe_column(config, &task.column_id)
+        describe_column(config, &issue.column_id)
     );
-    if let Some(color) = &task.color {
+    if let Some(color) = &issue.color {
         println!("Color:         {color}");
     }
     println!(
         "Responsible:   {}",
-        match task.responsible_user_id.as_deref() {
+        match issue.responsible_user_id.as_deref() {
             Some(user_id) => users.display(user_id),
             None => "unassigned".to_string(),
         }
     );
-    if !task.collaborators.is_empty() {
+    if !issue.collaborators.is_empty() {
         println!(
             "Collaborators: {}",
-            task.collaborators
+            issue
+                .collaborators
                 .iter()
                 .map(|collaborator| users.display(&collaborator.user_id))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
     }
-    if let Some(date) = &task.grouping_date {
+    if let Some(date) = &issue.grouping_date {
         println!("Grouped:       {date}");
     }
-    if !task.labels.is_empty() {
-        println!("Labels:        {}", join_labels(&task.labels));
+    if !issue.labels.is_empty() {
+        println!("Labels:        {}", join_labels(&issue.labels));
     }
 
-    if let Some(description) = task.description.as_deref().map(str::trim) {
+    if let Some(description) = issue.description.as_deref().map(str::trim) {
         if !description.is_empty() {
             println!("\nDescription\n{description}");
         }
     }
 
-    if !task.sub_tasks.is_empty() {
+    if !issue.sub_tasks.is_empty() {
         println!("\nSubtasks");
-        for (index, sub_task) in task.sub_tasks.iter().enumerate() {
-            println!("{}", format_subtask_line(index, sub_task));
+        for (index, sub_issue) in issue.sub_tasks.iter().enumerate() {
+            println!("{}", format_subtask_line(index, sub_issue));
         }
     }
 
@@ -475,12 +476,12 @@ fn print_aggregate(aggregate: &TaskAggregate, config: &Config, users: &mut UserN
     }
 }
 
-/// Render one checklist line for `task view`. `index` is the 0-based position in
+/// Render one checklist line for `issue view`. `index` is the 0-based position in
 /// `sub_tasks`; the printed number is 1-based so it matches `kf subtask list` and the
 /// position accepted by `kf subtask check`.
-fn format_subtask_line(index: usize, sub_task: &SubTask) -> String {
-    let mark = if sub_task.finished { 'x' } else { ' ' };
-    format!("  {}. [{mark}] {}", index + 1, sub_task.name)
+fn format_subtask_line(index: usize, sub_issue: &SubTask) -> String {
+    let mark = if sub_issue.finished { 'x' } else { ' ' };
+    format!("  {}. [{mark}] {}", index + 1, sub_issue.name)
 }
 
 /// Save attachments into `directory`, optionally only the images.
@@ -525,12 +526,12 @@ fn extension_of(name: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// The `PEOPLE` cell: the responsible user, then collaborators marked with `+`.
-fn describe_people(task: &Task, users: &mut UserNames<'_>) -> String {
-    let responsible = task
+fn describe_people(issue: &Issue, users: &mut UserNames<'_>) -> String {
+    let responsible = issue
         .responsible_user_id
         .as_deref()
         .map(|user_id| users.display(user_id));
-    let collaborators = task
+    let collaborators = issue
         .collaborators
         .iter()
         .map(|collaborator| format!("+{}", users.display(&collaborator.user_id)));
@@ -541,7 +542,7 @@ fn describe_people(task: &Task, users: &mut UserNames<'_>) -> String {
         .join(" ")
 }
 
-/// Which columns a `task list` run keeps. The variants are mutually exclusive on
+/// Which columns a `issue list` run keeps. The variants are mutually exclusive on
 /// the command line, so exactly one of `--state`, `--column` and `--open` decides.
 #[derive(Debug, PartialEq, Eq)]
 enum ColumnFilter<'a> {
@@ -556,7 +557,7 @@ enum ColumnFilter<'a> {
 }
 
 impl ColumnFilter<'_> {
-    fn keeps(&self, group: &TaskGroup) -> bool {
+    fn keeps(&self, group: &IssueGroup) -> bool {
         match self {
             ColumnFilter::Every => true,
             ColumnFilter::OnlyThese(columns) => columns.contains(&group.column_id.as_str()),
@@ -591,15 +592,15 @@ fn column_filter<'a>(
     })
 }
 
-fn select_groups<'a>(groups: &'a [TaskGroup], filter: &ColumnFilter<'_>) -> Vec<&'a TaskGroup> {
+fn select_groups<'a>(groups: &'a [IssueGroup], filter: &ColumnFilter<'_>) -> Vec<&'a IssueGroup> {
     groups.iter().filter(|group| filter.keeps(group)).collect()
 }
 
 fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     // Paged, not raw: a silently truncated Done column would make `list` lie
     // about what is on the board.
-    let groups: Vec<TaskGroup> =
-        tasks::fetch_all_groups(&context.client).context("listing the board's tasks")?;
+    let groups: Vec<IssueGroup> =
+        issues::fetch_all_groups(&context.client).context("listing the board's issues")?;
 
     let filter = column_filter(&args, &context.config)?;
     let selected = select_groups(&groups, &filter);
@@ -620,14 +621,14 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
     // `--mine` is the only filter that has to know who we are, so the identity
     // is demanded here rather than for every listing.
     let me = args.mine.then(|| context.my_user_id()).transpose()?;
-    let tasks: Vec<&Task> = selected
+    let issues: Vec<&Issue> = selected
         .iter()
         .flat_map(|group| group.tasks.iter())
-        .filter(|task| me.is_none_or(|me| guard::is_mine(task, me)))
+        .filter(|issue| me.is_none_or(|me| guard::is_mine(issue, me)))
         .collect();
 
     if args.json {
-        return Ok(output::print_json(&tasks)?);
+        return Ok(output::print_json(&issues)?);
     }
 
     let mut users = UserNames::new(&context.client, context.my_user_id_optional());
@@ -638,22 +639,22 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
         .iter()
         .map(|group| (group.column_id.as_str(), group.column_name.as_str()))
         .collect();
-    for task in &tasks {
+    for issue in &issues {
         table.row([
-            task.reference(),
-            match context.config.state_for_column(&task.column_id) {
+            issue.reference(),
+            match context.config.state_for_column(&issue.column_id) {
                 Some(state) => state.to_string(),
                 None => column_names
-                    .get(task.column_id.as_str())
+                    .get(issue.column_id.as_str())
                     .map(|name| (*name).to_string())
-                    .unwrap_or_else(|| task.column_id.clone()),
+                    .unwrap_or_else(|| issue.column_id.clone()),
             },
-            output::truncate_cell(&task.name, 60),
-            describe_people(task, &mut users),
-            join_labels(&task.labels),
+            output::truncate_cell(&issue.name, 60),
+            describe_people(issue, &mut users),
+            join_labels(&issue.labels),
         ]);
     }
-    table.print_or("No tasks match.");
+    table.print_or("No issues match.");
     Ok(())
 }
 
@@ -662,17 +663,17 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("editing task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("editing issue {}", issue.reference()))?;
 
-    let mut update = UpdateTask {
+    let mut update = UpdateIssue {
         name: args.name,
         color: args.color.map(|color| color.as_str().to_string()),
         ..Default::default()
     };
     update.description = match &args.append_description {
-        Some(addition) => Some(append_description(task.description.as_deref(), addition)),
+        Some(addition) => Some(append_description(issue.description.as_deref(), addition)),
         None => args.description,
     };
     if let Some(responsible) = &args.responsible {
@@ -696,7 +697,7 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
         // writing back the set read a moment ago. A teammate's concurrent label
         // change in that window is silently lost — the endpoint offers no
         // per-label add/remove and no version to check against.
-        update.labels = changed_labels(&task.labels, &added, &args.remove_labels);
+        update.labels = changed_labels(&issue.labels, &added, &args.remove_labels);
     }
 
     let changes = serde_json::to_value(&update).context("building the update payload")?;
@@ -706,21 +707,21 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
 
     context
         .client
-        .post_json_discard(&format!("tasks/{}", task.id), &update)
-        .with_context(|| format!("updating task {}", task.reference()))?;
+        .post_json_discard(&format!("tasks/{}", issue.id), &update)
+        .with_context(|| format!("updating issue {}", issue.reference()))?;
 
     if args.json {
         // The write already landed; only the read-back can still fail, and the
         // caller must not mistake that for a rejected edit.
-        let updated = resolve::resolve_task(&context.client, &task.id).with_context(|| {
+        let updated = resolve::resolve_issue(&context.client, &issue.id).with_context(|| {
             format!(
-                "the edit to task {} SUCCEEDED, but reading the task back for --json failed",
-                task.reference()
+                "the edit to issue {} SUCCEEDED, but reading the issue back for --json failed",
+                issue.reference()
             )
         })?;
         return Ok(output::print_json(&updated)?);
     }
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
@@ -770,40 +771,40 @@ fn changed_labels(current: &[Label], added: &[String], removed: &[String]) -> Op
 // move / delete
 // ---------------------------------------------------------------------------
 
-fn move_task(context: &Context, args: MoveArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("moving task {} to {}", task.reference(), args.to))?;
+fn move_issue(context: &Context, args: MoveArgs) -> anyhow::Result<()> {
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("moving issue {} to {}", issue.reference(), args.to))?;
     let column_id = context.config.column_id(args.to)?.to_string();
     if let Some(date) = &args.grouping_date {
         ensure_iso_date(date)?;
     }
 
     // groupingDate is omitted unless asked for: on a date-grouped column the
-    // server then files the task under today's UTC date, which is what a move
+    // server then files the issue under today's UTC date, which is what a move
     // into Done means anyway.
-    let update = UpdateTask {
+    let update = UpdateIssue {
         column_id: Some(column_id),
         grouping_date: args.grouping_date,
         ..Default::default()
     };
     context
         .client
-        .post_json_discard(&format!("tasks/{}", task.id), &update)
-        .with_context(|| format!("moving task {} to {}", task.reference(), args.to))?;
-    output::print_affected_task(&task);
+        .post_json_discard(&format!("tasks/{}", issue.id), &update)
+        .with_context(|| format!("moving issue {} to {}", issue.reference(), args.to))?;
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("deleting task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("deleting issue {}", issue.reference()))?;
     if !args.yes
         && !confirm(&format!(
-            "Delete task {} ({})?",
-            task.reference(),
-            task.name
+            "Delete issue {} ({})?",
+            issue.reference(),
+            issue.name
         ))?
     {
         println!("Cancelled.");
@@ -811,9 +812,9 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
     }
     context
         .client
-        .delete(&format!("tasks/{}", task.id))
-        .with_context(|| format!("deleting task {}", task.reference()))?;
-    output::print_affected_task(&task);
+        .delete(&format!("tasks/{}", issue.id))
+        .with_context(|| format!("deleting issue {}", issue.reference()))?;
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
@@ -822,35 +823,39 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn grab(context: &Context, args: GrabArgs) -> anyhow::Result<()> {
-    let mut task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_take_over(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("grabbing task {}", task.reference()))?;
+    let mut issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_take_over(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("grabbing issue {}", issue.reference()))?;
     let column_id = context.config.column_id(CanonicalState::Wip)?.to_string();
 
-    let update = UpdateTask {
+    let update = UpdateIssue {
         column_id: Some(column_id.clone()),
         responsible_user_id: Some(serde_json::Value::String(context.my_user_id()?.to_string())),
         ..Default::default()
     };
     context
         .client
-        .post_json_discard(&format!("tasks/{}", task.id), &update)
-        .with_context(|| format!("grabbing task {}", task.reference()))?;
+        .post_json_discard(&format!("tasks/{}", issue.id), &update)
+        .with_context(|| format!("grabbing issue {}", issue.reference()))?;
     // Mirror the accepted update locally instead of spending a re-read.
-    task.column_id = column_id;
-    task.responsible_user_id = Some(context.my_user_id()?.to_string());
+    issue.column_id = column_id;
+    issue.responsible_user_id = Some(context.my_user_id()?.to_string());
 
     // Everything below is read-only follow-up. The single POST above already
     // landed both the assignment and the move, so failures here say so.
     let grabbed = format!(
-        "task {} WAS assigned to you and moved to wip",
-        task.reference()
+        "issue {} WAS assigned to you and moved to wip",
+        issue.reference()
     );
-    let aggregate = fetch_aggregate(&context.client, task)
-        .with_context(|| format!("reading task {} back after the grab ({grabbed})", args.task))?;
+    let aggregate = fetch_aggregate(&context.client, issue).with_context(|| {
+        format!(
+            "reading issue {} back after the grab ({grabbed})",
+            args.issue
+        )
+    })?;
     if let Some(directory) = &args.download_dir {
         let saved = download_attachments(&context.client, &aggregate.attachments, directory, true)
-            .with_context(|| format!("downloading the task's images ({grabbed})"))?;
+            .with_context(|| format!("downloading the issue's images ({grabbed})"))?;
         if !args.json {
             for path in &saved {
                 println!("saved {}", path.display());
@@ -897,14 +902,14 @@ impl FinishProgress {
 
     /// The landed-writes clause for a failure before the move.
     fn note_before_move(&self) -> String {
-        format!("{}; the task was NOT moved", self.landed())
+        format!("{}; the issue was NOT moved", self.landed())
     }
 }
 
 fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("finishing task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("finishing issue {}", issue.reference()))?;
     let column_id = context.config.column_id(args.to)?.to_string();
     let mut progress = FinishProgress::default();
 
@@ -916,11 +921,11 @@ fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
         };
         let _: CreateCommentResponse = context
             .client
-            .post_json(&format!("tasks/{}/comments", task.id), &comment)
+            .post_json(&format!("tasks/{}/comments", issue.id), &comment)
             .with_context(|| {
                 format!(
-                    "commenting on task {} ({})",
-                    task.reference(),
+                    "commenting on issue {} ({})",
+                    issue.reference(),
                     progress.note_before_move()
                 )
             })?;
@@ -928,7 +933,7 @@ fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
     }
 
     if args.check_subtasks {
-        let unfinished = unfinished_subtask_indexes(&task);
+        let unfinished = unfinished_subtask_indexes(&issue);
         progress.subtasks_to_check = unfinished.len();
         for index in unfinished {
             let payload = SubTaskPayload {
@@ -938,13 +943,13 @@ fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
             context
                 .client
                 .post_json_discard(
-                    &format!("tasks/{}/subtasks/by-index/{index}", task.id),
+                    &format!("tasks/{}/subtasks/by-index/{index}", issue.id),
                     &payload,
                 )
                 .with_context(|| {
                     format!(
-                        "checking subtask {index} of task {} ({})",
-                        task.reference(),
+                        "checking subtask {index} of issue {} ({})",
+                        issue.reference(),
                         progress.note_before_move()
                     )
                 })?;
@@ -952,30 +957,31 @@ fn finish(context: &Context, args: FinishArgs) -> anyhow::Result<()> {
         }
     }
 
-    let update = UpdateTask {
+    let update = UpdateIssue {
         column_id: Some(column_id),
         ..Default::default()
     };
     context
         .client
-        .post_json_discard(&format!("tasks/{}", task.id), &update)
+        .post_json_discard(&format!("tasks/{}", issue.id), &update)
         .with_context(|| {
             format!(
-                "moving task {} to {} ({})",
-                task.reference(),
+                "moving issue {} to {} ({})",
+                issue.reference(),
                 args.to,
                 progress.note_before_move()
             )
         })?;
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
-fn unfinished_subtask_indexes(task: &Task) -> Vec<usize> {
-    task.sub_tasks
+fn unfinished_subtask_indexes(issue: &Issue) -> Vec<usize> {
+    issue
+        .sub_tasks
         .iter()
         .enumerate()
-        .filter(|(_, sub_task)| !sub_task.finished)
+        .filter(|(_, sub_issue)| !sub_issue.finished)
         .map(|(index, _)| index)
         .collect()
 }
@@ -1010,7 +1016,7 @@ fn responsible_user_id(value: &str, my_user_id: &str) -> anyhow::Result<Option<S
     }
 }
 
-/// Created tasks are yours by default, so the ownership guard does not block follow-ups.
+/// Created issues are yours by default, so the ownership guard does not block follow-ups.
 fn create_responsible_user_id(
     value: Option<&str>,
     my_user_id: &str,
@@ -1057,7 +1063,7 @@ mod tests {
 
     /// A board with a lane that maps to no canonical state, because that is the
     /// case `--open` has to decide about.
-    fn board() -> Vec<TaskGroup> {
+    fn board() -> Vec<IssueGroup> {
         serde_json::from_str(
             r#"[{"columnId":"CTODO","columnName":"To-do","tasks":[]},
                 {"columnId":"CWIP","columnName":"In progress","tasks":[]},
@@ -1070,9 +1076,7 @@ mod tests {
     fn board_config() -> Config {
         Config {
             board_id: "F2QMK1B".to_string(),
-            board_name: "My first board".to_string(),
-            legacy_user_id: None,
-            vcs: None,
+            board_name: Some("My first board".to_string()),
             states: StateColumns {
                 todo: Some("CTODO".to_string()),
                 wip: Some("CWIP".to_string()),
@@ -1093,7 +1097,7 @@ mod tests {
         }
     }
 
-    fn kept_columns(groups: &[TaskGroup], args: &ListArgs) -> Result<Vec<String>, ConfigError> {
+    fn kept_columns(groups: &[IssueGroup], args: &ListArgs) -> Result<Vec<String>, ConfigError> {
         let config = board_config();
         let filter = column_filter(args, &config)?;
         Ok(select_groups(groups, &filter)
@@ -1169,7 +1173,7 @@ mod tests {
 
     #[test]
     fn format_subtask_line_numbers_from_one() {
-        let sub_task = SubTask {
+        let sub_issue = SubTask {
             name: "Reproduce on staging".to_string(),
             finished: false,
             user_id: None,
@@ -1177,12 +1181,12 @@ mod tests {
             due_date_timestamp_local: None,
         };
         assert_eq!(
-            format_subtask_line(0, &sub_task),
+            format_subtask_line(0, &sub_issue),
             "  1. [ ] Reproduce on staging"
         );
         let finished = SubTask {
             finished: true,
-            ..sub_task
+            ..sub_issue
         };
         assert_eq!(
             format_subtask_line(2, &finished),
@@ -1270,19 +1274,19 @@ mod tests {
 
     #[test]
     fn unfinished_subtasks_are_reported_by_index() {
-        let task: Task = serde_json::from_str(
+        let issue: Issue = serde_json::from_str(
             r#"{"_id":"T1","name":"n","columnId":"C1","subTasks":[
                 {"name":"a","finished":true},{"name":"b"},{"name":"c"}]}"#,
         )
         .expect("fixture parses");
-        assert_eq!(unfinished_subtask_indexes(&task), vec![1, 2]);
+        assert_eq!(unfinished_subtask_indexes(&issue), vec![1, 2]);
     }
 
     #[test]
     fn finish_progress_names_every_write_that_landed() {
         assert_eq!(
             FinishProgress::default().note_before_move(),
-            "nothing had been written yet; the task was NOT moved"
+            "nothing had been written yet; the issue was NOT moved"
         );
         assert_eq!(
             FinishProgress {
@@ -1291,7 +1295,7 @@ mod tests {
                 subtasks_to_check: 3,
             }
             .note_before_move(),
-            "the closing comment WAS posted and 2/3 subtasks WERE checked; the task was NOT moved"
+            "the closing comment WAS posted and 2/3 subtasks WERE checked; the issue was NOT moved"
         );
         assert_eq!(
             FinishProgress {

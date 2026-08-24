@@ -16,11 +16,11 @@ pub const GUARDRAIL: i32 = 3;
 /// No usable API token, the API rejected it, or `kf` does not know which board
 /// user it acts as. All three are fixed by `kf auth login`.
 pub const AUTH: i32 = 4;
-/// The board, task, comment or attachment does not exist.
+/// The board, issue, comment or attachment does not exist.
 pub const NOT_FOUND: i32 = 5;
 /// Rate limit hit; back off before retrying.
 pub const RATE_LIMITED: i32 = 6;
-/// No `.mpx/kanbanflow.json`, or it is unusable. Run `kf init`.
+/// No `mpxconfig.json`, or it is unusable. Run `kf init`.
 pub const NO_CONFIG: i32 = 7;
 
 /// Map an error chain onto the documented exit codes.
@@ -65,9 +65,9 @@ mod tests {
     #[test]
     fn guardrail_refusal_has_its_own_exit_code() {
         let error = anyhow::Error::new(GuardError::Unassigned {
-            task: "E613".to_string(),
+            issue: "E613".to_string(),
         })
-        .context("moving task E613");
+        .context("moving issue E613");
         assert_eq!(classify(&error), GUARDRAIL);
     }
 
@@ -76,7 +76,7 @@ mod tests {
         assert_eq!(classify(&anyhow::Error::new(ApiError::Unauthorized)), AUTH);
         assert_eq!(
             classify(&anyhow::Error::new(ApiError::NotFound {
-                message: "no such task".to_string()
+                message: "no such issue".to_string()
             })),
             NOT_FOUND
         );
@@ -88,16 +88,16 @@ mod tests {
         );
     }
 
-    /// `resolve_task` returns `ResolveError::Api`, so the wrapped variant — not
+    /// `resolve_issue` returns `ResolveError::Api`, so the wrapped variant — not
     /// the wrapper — has to decide the exit code, through any `.context()` layers.
     #[test]
     fn api_errors_wrapped_by_resolve_keep_their_codes() {
         let wrapped = |api_error: ApiError| {
-            anyhow::Error::new(ResolveError::Api(api_error)).context("looking up task E613")
+            anyhow::Error::new(ResolveError::Api(api_error)).context("looking up issue E613")
         };
         assert_eq!(
             classify(&wrapped(ApiError::NotFound {
-                message: "no such task".to_string()
+                message: "no such issue".to_string()
             })),
             NOT_FOUND
         );
@@ -121,7 +121,7 @@ mod tests {
         let error = anyhow::Error::new(ResolveError::NumberNotFound {
             reference: "E613".to_string(),
         })
-        .context("looking up task E613");
+        .context("looking up issue E613");
         assert_eq!(classify(&error), NOT_FOUND);
     }
 
@@ -132,7 +132,7 @@ mod tests {
         let error = anyhow::Error::new(UnknownUser {
             board_id: "F2QMK1B".to_string(),
         })
-        .context("listing my tasks");
+        .context("listing my issues");
         assert_eq!(classify(&error), AUTH);
     }
 

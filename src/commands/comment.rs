@@ -1,6 +1,6 @@
-//! `kf comment` — task comments.
+//! `kf comment` — issue comments.
 //!
-//! Adding a comment to a teammate's task is legitimate collaboration, so only
+//! Adding a comment to a teammate's issue is legitimate collaboration, so only
 //! editing and deleting go through the shared-board guardrail.
 
 use std::path::PathBuf;
@@ -19,9 +19,9 @@ use crate::users::UserNames;
 
 #[derive(Debug, Subcommand)]
 pub enum CommentCommand {
-    /// Add a comment to a task.
+    /// Add a comment to an issue.
     Add(AddArgs),
-    /// List a task's comments.
+    /// List an issue's comments.
     List(ListArgs),
     /// Replace a comment's text.
     Edit(EditArgs),
@@ -32,8 +32,8 @@ pub enum CommentCommand {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("body").required(true).args(["text", "file"])))]
 pub struct AddArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Comment text.
     #[arg(long)]
     pub text: Option<String>,
@@ -44,8 +44,8 @@ pub struct AddArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Print JSON instead of the human-readable output.
     #[arg(long)]
     pub json: bool,
@@ -54,8 +54,8 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("body").required(true).args(["text", "file"])))]
 pub struct EditArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// ID of the comment to change (see `kf comment list`).
     #[arg(long)]
     pub id: String,
@@ -65,22 +65,22 @@ pub struct EditArgs {
     /// Read the new comment text from a file.
     #[arg(long)]
     pub file: Option<PathBuf>,
-    /// Edit even when the task belongs to someone else.
+    /// Edit even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// ID of the comment to delete (see `kf comment list`).
     #[arg(long)]
     pub id: String,
     /// Skip the confirmation prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Delete even when the task belongs to someone else.
+    /// Delete even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
@@ -97,22 +97,22 @@ pub fn run(command: CommentCommand) -> anyhow::Result<()> {
 
 fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
     let text = comment_text(args.text, args.file)?;
-    let task_id = resolve::resolve_task_id_named(&context.client, &args.task)?;
+    let issue_id = resolve::resolve_issue_id_named(&context.client, &args.issue)?;
     let created: CreateCommentResponse = context
         .client
         .post_json(
-            &format!("tasks/{task_id}/comments"),
+            &format!("tasks/{issue_id}/comments"),
             &CreateComment { text },
         )
-        .with_context(|| format!("adding a comment to task {}", args.task))?;
+        .with_context(|| format!("adding a comment to issue {}", args.issue))?;
     println!("{}", created.task_comment_id);
-    output::print_affected(&task_id, None);
+    output::print_affected(&issue_id, None);
     Ok(())
 }
 
 fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
-    let task_id = resolve::resolve_task_id_named(&context.client, &args.task)?;
-    let comments = fetch_comments(&context.client, &task_id)?;
+    let issue_id = resolve::resolve_issue_id_named(&context.client, &args.issue)?;
+    let comments = fetch_comments(&context.client, &issue_id)?;
 
     if args.json {
         output::print_json(&comments)?;
@@ -136,38 +136,44 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
             output::truncate_cell(&comment.text, 80),
         ]);
     }
-    table.print_or("No comments on this task.");
+    table.print_or("No comments on this issue.");
     Ok(())
 }
 
 fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     let text = comment_text(args.text, args.file)?;
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("editing a comment on task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("editing a comment on issue {}", issue.reference()))?;
 
     context
         .client
         .post_json_discard(
-            &format!("tasks/{}/comments/{}", task.id, args.id),
+            &format!("tasks/{}/comments/{}", issue.id, args.id),
             &UpdateComment { text },
         )
-        .with_context(|| format!("updating comment {} on task {}", args.id, task.reference()))?;
+        .with_context(|| {
+            format!(
+                "updating comment {} on issue {}",
+                args.id,
+                issue.reference()
+            )
+        })?;
     println!("Updated comment {}.", args.id);
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("deleting a comment on task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("deleting a comment on issue {}", issue.reference()))?;
 
     if !args.yes
         && !confirm(&format!(
-            "Delete comment {} from task {}?",
+            "Delete comment {} from issue {}?",
             args.id,
-            task.reference()
+            issue.reference()
         ))?
     {
         println!("Cancelled.");
@@ -176,23 +182,23 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
 
     context
         .client
-        .delete(&format!("tasks/{}/comments/{}", task.id, args.id))
+        .delete(&format!("tasks/{}/comments/{}", issue.id, args.id))
         .with_context(|| {
             format!(
-                "deleting comment {} from task {}",
+                "deleting comment {} from issue {}",
                 args.id,
-                task.reference()
+                issue.reference()
             )
         })?;
     println!("Deleted comment {}.", args.id);
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
-fn fetch_comments(client: &Client, task_id: &str) -> anyhow::Result<Vec<Comment>> {
+fn fetch_comments(client: &Client, issue_id: &str) -> anyhow::Result<Vec<Comment>> {
     client
-        .get_json(&format!("tasks/{task_id}/comments"), &[])
-        .with_context(|| format!("reading the comments of task {task_id}"))
+        .get_json(&format!("tasks/{issue_id}/comments"), &[])
+        .with_context(|| format!("reading the comments of issue {issue_id}"))
 }
 
 /// The comment body from exactly one of `--text` / `--file`. clap's ArgGroup

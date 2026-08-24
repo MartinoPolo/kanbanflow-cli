@@ -6,6 +6,6 @@ pub mod auth;
 pub mod board;
 pub mod comment;
 pub mod init;
+pub mod issue;
 pub mod label;
 pub mod subtask;
-pub mod task;

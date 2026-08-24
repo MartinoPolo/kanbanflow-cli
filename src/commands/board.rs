@@ -3,17 +3,17 @@
 use anyhow::Context as _;
 use clap::Args;
 
-use crate::api::models::{Board, TaskGroup};
+use crate::api::models::{Board, IssueGroup};
 use crate::context::Context;
+use crate::issues;
 use crate::output::{self, Table};
-use crate::tasks;
 
 #[derive(Debug, Args)]
 pub struct BoardArgs {
     /// Print the raw `GET /board` response.
     #[arg(long)]
     pub json: bool,
-    /// Also show how many tasks sit in each column (costs one extra request).
+    /// Also show how many issues sit in each column (costs one extra request).
     #[arg(long)]
     pub counts: bool,
 }
@@ -34,8 +34,8 @@ pub fn run(args: BoardArgs) -> anyhow::Result<()> {
         .client
         .get_json("board", &[])
         .context("fetching the board (GET /board)")?;
-    let groups: Vec<TaskGroup> = if args.counts {
-        tasks::fetch_all_groups(&context.client).context("counting tasks (GET /tasks)")?
+    let groups: Vec<IssueGroup> = if args.counts {
+        issues::fetch_all_groups(&context.client).context("counting issues (GET /tasks)")?
     } else {
         Vec::new()
     };
@@ -44,7 +44,7 @@ pub fn run(args: BoardArgs) -> anyhow::Result<()> {
 
     let mut headers = vec!["COLUMN", "STATE", "COLUMN ID"];
     if args.counts {
-        headers.push("TASKS");
+        headers.push("ISSUES");
     }
     let mut table = Table::new(&headers);
     let mut truncated = false;
@@ -71,10 +71,10 @@ pub fn run(args: BoardArgs) -> anyhow::Result<()> {
     table.print_or("This board has no columns.");
 
     // Truncated cells are paged through, so this only fires when a cell held more
-    // tasks than the continuation cap allows.
+    // issues than the continuation cap allows.
     if truncated {
         eprintln!(
-            "A date-grouped column has more tasks than `kf` pages through; its count is a lower bound."
+            "A date-grouped column has more issues than `kf` pages through; its count is a lower bound."
         );
     }
     if !board.swimlanes.is_empty() {

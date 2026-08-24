@@ -292,7 +292,7 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
             "environmentVariableSet": environment_token.is_some(),
             "storedInCredentialStore": stored,
             "boardId": config.as_ref().map(|config| config.board_id.as_str()),
-            "boardName": config.as_ref().map(|config| config.board_name.as_str()),
+            "boardName": config.as_ref().and_then(|config| config.board_name.as_deref()),
             "userId": user_id,
             "knownBoards": registry.boards,
         }))
@@ -301,7 +301,11 @@ fn status(args: StatusArgs) -> anyhow::Result<()> {
 
     println!("Token source: {source}");
     match &config {
-        Some(config) => println!("Board:        {} ({})", config.board_name, config.board_id),
+        Some(config) => println!(
+            "Board:        {} ({})",
+            config.board_name.as_deref().unwrap_or("(unnamed)"),
+            config.board_id
+        ),
         None => println!("Board:        unknown (no `{CONFIG_RELATIVE_PATH}`)"),
     }
     match &user_id {

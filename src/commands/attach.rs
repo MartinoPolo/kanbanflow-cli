@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use crate::api::models::{AddAttachmentResponse, Attachment, Task};
+use crate::api::models::{AddAttachmentResponse, Attachment, Issue};
 use crate::api::{ApiError, Client};
 use crate::context::Context;
 use crate::files::unique_destination;
@@ -22,32 +22,32 @@ use crate::resolve;
 
 #[derive(Debug, Subcommand)]
 pub enum AttachCommand {
-    /// Upload files to a task.
+    /// Upload files to an issue.
     Add(AddArgs),
-    /// List a task's attachments.
+    /// List an issue's attachments.
     List(ListArgs),
-    /// Download a task's attachments before their links expire.
+    /// Download an issue's attachments before their links expire.
     Download(DownloadArgs),
-    /// Remove an attachment from a task.
+    /// Remove an attachment from an issue.
     Delete(DeleteArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Files to upload.
     #[arg(required = true)]
     pub files: Vec<PathBuf>,
-    /// Upload even when the task belongs to someone else.
+    /// Upload even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Print JSON instead of the human-readable output.
     #[arg(long)]
     pub json: bool,
@@ -55,8 +55,8 @@ pub struct ListArgs {
 
 #[derive(Debug, Args)]
 pub struct DownloadArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Only the attachment with this exact name; default is every attachment.
     #[arg(long)]
     pub name: Option<String>,
@@ -70,15 +70,15 @@ pub struct DownloadArgs {
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Exact name of the attachment to remove.
     #[arg(long)]
     pub name: String,
     /// Skip the confirmation prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Delete even when the task belongs to someone else.
+    /// Delete even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
@@ -102,11 +102,11 @@ pub fn run(command: AttachCommand) -> anyhow::Result<()> {
 }
 
 fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("attaching files to task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("attaching files to issue {}", issue.reference()))?;
 
-    let path = format!("tasks/{}/attachments", task.id);
+    let path = format!("tasks/{}/attachments", issue.id);
     let mut failures = 0usize;
     // The first typed API failure becomes the source of the aggregate error, so
     // an all-401 or all-429 run still exits with its own code instead of 1.
@@ -136,22 +136,22 @@ fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
     }
     if failures > 0 {
         let summary = format!(
-            "{failures} of {} file(s) could not be attached to task {}",
+            "{failures} of {} file(s) could not be attached to issue {}",
             args.files.len(),
-            task.reference()
+            issue.reference()
         );
         return Err(match first_api_error {
             Some(error) => anyhow::Error::new(error).context(summary),
             None => anyhow::Error::msg(summary),
         });
     }
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
 fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
-    let task_id = resolve::resolve_task_id_named(&context.client, &args.task)?;
-    let attachments = fetch_attachments(&context.client, &task_id)?;
+    let issue_id = resolve::resolve_issue_id_named(&context.client, &args.issue)?;
+    let attachments = fetch_attachments(&context.client, &issue_id)?;
 
     if args.json {
         output::print_json(&attachments)?;
@@ -166,13 +166,13 @@ fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
             attachment.created_by_full_name.clone().unwrap_or_default(),
         ]);
     }
-    table.print_or("No attachments on this task.");
+    table.print_or("No attachments on this issue.");
     Ok(())
 }
 
 fn download(context: &Context, args: DownloadArgs) -> anyhow::Result<()> {
-    let task_id = resolve::resolve_task_id_named(&context.client, &args.task)?;
-    let attachments = fetch_attachments(&context.client, &task_id)?;
+    let issue_id = resolve::resolve_issue_id_named(&context.client, &args.issue)?;
+    let attachments = fetch_attachments(&context.client, &issue_id)?;
     let selected: Vec<&Attachment> = match &args.name {
         Some(name) => attachments
             .iter()
@@ -183,11 +183,11 @@ fn download(context: &Context, args: DownloadArgs) -> anyhow::Result<()> {
     if selected.is_empty() {
         match &args.name {
             Some(name) => anyhow::bail!(
-                "No attachment named `{name}` on task {}.{}",
-                args.task,
+                "No attachment named `{name}` on issue {}.{}",
+                args.issue,
                 available_names(&attachments)
             ),
-            None => anyhow::bail!("Task {} has no attachments.", args.task),
+            None => anyhow::bail!("Issue {} has no attachments.", args.issue),
         }
     }
 
@@ -217,18 +217,18 @@ fn download(context: &Context, args: DownloadArgs) -> anyhow::Result<()> {
 }
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("deleting an attachment of task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("deleting an attachment of issue {}", issue.reference()))?;
 
-    let attachments = fetch_attachments(&context.client, &task.id)?;
-    let attachment = exactly_one_named(&attachments, &args.name, &task)?;
+    let attachments = fetch_attachments(&context.client, &issue.id)?;
+    let attachment = exactly_one_named(&attachments, &args.name, &issue)?;
 
     if !args.yes
         && !confirm(&format!(
-            "Delete attachment `{}` from task {}?",
+            "Delete attachment `{}` from issue {}?",
             attachment.name,
-            task.reference()
+            issue.reference()
         ))?
     {
         println!("Cancelled.");
@@ -237,23 +237,23 @@ fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
 
     context
         .client
-        .delete(&format!("tasks/{}/attachments/{}", task.id, attachment.id))
+        .delete(&format!("tasks/{}/attachments/{}", issue.id, attachment.id))
         .with_context(|| {
             format!(
-                "deleting attachment `{}` from task {}",
+                "deleting attachment `{}` from issue {}",
                 attachment.name,
-                task.reference()
+                issue.reference()
             )
         })?;
     println!("Deleted attachment `{}`.", attachment.name);
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
-fn fetch_attachments(client: &Client, task_id: &str) -> anyhow::Result<Vec<Attachment>> {
+fn fetch_attachments(client: &Client, issue_id: &str) -> anyhow::Result<Vec<Attachment>> {
     client
-        .get_json(&format!("tasks/{task_id}/attachments"), &[])
-        .with_context(|| format!("reading the attachments of task {task_id}"))
+        .get_json(&format!("tasks/{issue_id}/attachments"), &[])
+        .with_context(|| format!("reading the attachments of issue {issue_id}"))
 }
 
 /// Exactly one attachment must carry the name; anything else is a refusal,
@@ -261,7 +261,7 @@ fn fetch_attachments(client: &Client, task_id: &str) -> anyhow::Result<Vec<Attac
 fn exactly_one_named<'a>(
     attachments: &'a [Attachment],
     name: &str,
-    task: &Task,
+    issue: &Issue,
 ) -> anyhow::Result<&'a Attachment> {
     let matches: Vec<&Attachment> = attachments
         .iter()
@@ -270,13 +270,13 @@ fn exactly_one_named<'a>(
     match matches.as_slice() {
         [single] => Ok(single),
         [] => anyhow::bail!(
-            "No attachment named `{name}` on task {}.{}",
-            task.reference(),
+            "No attachment named `{name}` on issue {}.{}",
+            issue.reference(),
             available_names(attachments)
         ),
         several => anyhow::bail!(
-            "Task {} has {} attachments named `{name}`; delete them from the KanbanFlow UI.",
-            task.reference(),
+            "Issue {} has {} attachments named `{name}`; delete them from the KanbanFlow UI.",
+            issue.reference(),
             several.len()
         ),
     }
@@ -320,7 +320,7 @@ mod tests {
         }
     }
 
-    fn task() -> Task {
+    fn issue() -> Issue {
         serde_json::from_str(r#"{"_id":"T3s6UGyzY","name":"Report","columnId":"C1"}"#)
             .expect("fixture parses")
     }
@@ -335,19 +335,19 @@ mod tests {
 
     #[test]
     fn exactly_one_named_rejects_missing_and_ambiguous() {
-        let task = task();
+        let issue = issue();
         let attachments = vec![
             attachment("a.png"),
             attachment("a.png"),
             attachment("b.png"),
         ];
         assert_eq!(
-            exactly_one_named(&attachments, "b.png", &task)
+            exactly_one_named(&attachments, "b.png", &issue)
                 .expect("unique name resolves")
                 .name,
             "b.png"
         );
-        assert!(exactly_one_named(&attachments, "a.png", &task).is_err());
-        assert!(exactly_one_named(&attachments, "c.png", &task).is_err());
+        assert!(exactly_one_named(&attachments, "a.png", &issue).is_err());
+        assert!(exactly_one_named(&attachments, "c.png", &issue).is_err());
     }
 }

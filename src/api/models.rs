@@ -433,6 +433,14 @@ pub struct AddAttachmentResponse {
     pub task_attachment_id: String,
 }
 
+// Public MPX vocabulary aliases. The underlying names remain because these
+// structs directly mirror KanbanFlow's `/tasks` wire contract.
+pub type Issue = Task;
+pub type IssueGroup = TaskGroup;
+pub type CreateIssue = CreateTask;
+pub type UpdateIssue = UpdateTask;
+pub type CreateIssueResponse = CreateTaskResponse;
+
 #[cfg(test)]
 mod tests {
     use super::*;

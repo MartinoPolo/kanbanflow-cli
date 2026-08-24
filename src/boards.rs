@@ -6,10 +6,9 @@
 //! by, so authenticating once is enough — `kf init` in a fresh repo reuses the
 //! stored token instead of asking for it a second time.
 //!
-//! The acting user lives here rather than in the repo's `kanbanflow.json`
-//! because that file is committed and shared: a teammate who cloned a config
-//! carrying someone else's `userId` would have `--mine` list that person's
-//! tasks and the guardrail protect the wrong ones.
+//! The acting user lives here rather than in the repo's committed
+//! `mpxconfig.json`, so each teammate's `--mine` and guardrail identity remains
+//! local to their machine.
 
 use std::path::{Path, PathBuf};
 

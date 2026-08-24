@@ -18,7 +18,7 @@ pub struct Context {
 }
 
 impl Context {
-    /// Load `.mpx/kanbanflow.json` (searching upward), resolve the token and
+    /// Load `mpxconfig.json` (searching upward), resolve the token and
     /// the acting user. No HTTP request is made here.
     pub fn load() -> anyhow::Result<Self> {
         let config = Config::load()?;
@@ -35,7 +35,7 @@ impl Context {
 
     /// The user we act as; the guardrail's notion of "me". An error when this
     /// machine has no identity for the board, because guessing would either
-    /// block the user from their own tasks or let them walk over a teammate's.
+    /// block the user from their own issues or let them walk over a teammate's.
     pub fn my_user_id(&self) -> anyhow::Result<&str> {
         self.user_id.as_deref().ok_or_else(|| {
             anyhow::Error::new(users::UnknownUser {

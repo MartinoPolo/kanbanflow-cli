@@ -1,13 +1,13 @@
-//! `kf subtask` — a task's checklist items.
+//! `kf subtask` — an issue's checklist items.
 //!
-//! Subtasks come inline with the task read, so every verb here resolves the task
+//! Subtasks come inline with the issue read, so every verb here resolves the issue
 //! once and then addresses the item through the API's `by-index` endpoint —
 //! indexes are unambiguous where names may repeat or need URL escaping.
 
 use anyhow::Context as _;
 use clap::{Args, Subcommand};
 
-use crate::api::models::{SubTask, SubTaskPayload, Task};
+use crate::api::models::{Issue, SubTask, SubTaskPayload};
 use crate::context::Context;
 use crate::guard;
 use crate::output::{self, Table};
@@ -17,7 +17,7 @@ use crate::resolve;
 pub enum SubtaskCommand {
     /// Append a checklist item.
     Add(AddArgs),
-    /// List a task's checklist items.
+    /// List an issue's checklist items.
     List(ListArgs),
     /// Mark a checklist item finished.
     Check(CheckArgs),
@@ -27,19 +27,19 @@ pub enum SubtaskCommand {
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Checklist item name.
     pub name: String,
-    /// Add even when the task belongs to someone else.
+    /// Add even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Print JSON instead of the human-readable output.
     #[arg(long)]
     pub json: bool,
@@ -47,11 +47,11 @@ pub struct ListArgs {
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
-    /// Task number (`E613`) or task ID.
-    pub task: String,
+    /// Issue number (`E613`) or issue ID.
+    pub issue: String,
     /// Exact checklist item name, or its 1-based position in the list.
     pub subtask: String,
-    /// Change even when the task belongs to someone else.
+    /// Change even when the issue belongs to someone else.
     #[arg(long)]
     pub force: bool,
 }
@@ -75,9 +75,9 @@ pub fn run(command: SubtaskCommand) -> anyhow::Result<()> {
 }
 
 fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("adding a subtask to task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("adding a subtask to issue {}", issue.reference()))?;
 
     let payload = SubTaskPayload {
         name: Some(args.name.clone()),
@@ -85,46 +85,46 @@ fn add(context: &Context, args: AddArgs) -> anyhow::Result<()> {
     };
     context
         .client
-        .post_json_discard(&format!("tasks/{}/subtasks", task.id), &payload)
+        .post_json_discard(&format!("tasks/{}/subtasks", issue.id), &payload)
         .with_context(|| {
             format!(
-                "adding subtask `{}` to task {}",
+                "adding subtask `{}` to issue {}",
                 args.name,
-                task.reference()
+                issue.reference()
             )
         })?;
     println!("[ ] {}", args.name);
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
 fn list(context: &Context, args: ListArgs) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
 
     if args.json {
-        output::print_json(&task.sub_tasks)?;
+        output::print_json(&issue.sub_tasks)?;
         return Ok(());
     }
     let mut table = Table::new(&["#", "DONE", "NAME"]);
-    for (index, subtask) in task.sub_tasks.iter().enumerate() {
+    for (index, subtask) in issue.sub_tasks.iter().enumerate() {
         table.row([
             format!("{}", index + 1),
             checkbox(subtask.finished).to_string(),
             subtask.name.clone(),
         ]);
     }
-    table.print_or("No subtasks on this task.");
+    table.print_or("No subtasks on this issue.");
     Ok(())
 }
 
 fn set_finished(context: &Context, args: CheckArgs, finished: bool) -> anyhow::Result<()> {
-    let task = resolve::resolve_task_named(&context.client, &args.task)?;
-    guard::ensure_can_mutate(&task, context.my_user_id()?, args.force)
-        .with_context(|| format!("changing a subtask of task {}", task.reference()))?;
+    let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("changing a subtask of issue {}", issue.reference()))?;
 
-    let index = find_subtask(&task.sub_tasks, &args.subtask)
-        .map_err(|error| selector_error(error, &task, &args.subtask))?;
-    let subtask = &task.sub_tasks[index];
+    let index = find_subtask(&issue.sub_tasks, &args.subtask)
+        .map_err(|error| selector_error(error, &issue, &args.subtask))?;
+    let subtask = &issue.sub_tasks[index];
 
     if subtask.finished == finished {
         println!(
@@ -143,18 +143,18 @@ fn set_finished(context: &Context, args: CheckArgs, finished: bool) -> anyhow::R
     context
         .client
         .post_json_discard(
-            &format!("tasks/{}/subtasks/by-index/{index}", task.id),
+            &format!("tasks/{}/subtasks/by-index/{index}", issue.id),
             &payload,
         )
         .with_context(|| {
             format!(
-                "updating subtask `{}` of task {}",
+                "updating subtask `{}` of issue {}",
                 subtask.name,
-                task.reference()
+                issue.reference()
             )
         })?;
     println!("{} {}", checkbox(finished), subtask.name);
-    output::print_affected_task(&task);
+    output::print_affected_issue(&issue);
     Ok(())
 }
 
@@ -189,8 +189,8 @@ fn find_subtask(subtasks: &[SubTask], selector: &str) -> Result<usize, SelectErr
 }
 
 /// Turn a selector failure into a message that shows the caller what exists.
-fn selector_error(error: SelectError, task: &Task, selector: &str) -> anyhow::Error {
-    let listing = task
+fn selector_error(error: SelectError, issue: &Issue, selector: &str) -> anyhow::Error {
+    let listing = issue
         .sub_tasks
         .iter()
         .enumerate()
@@ -205,16 +205,16 @@ fn selector_error(error: SelectError, task: &Task, selector: &str) -> anyhow::Er
         .collect::<String>();
     match error {
         SelectError::AmbiguousName(count) => anyhow::anyhow!(
-            "Task {} has {count} subtasks named `{selector}`; use its position instead:{listing}",
-            task.reference()
+            "Issue {} has {count} subtasks named `{selector}`; use its position instead:{listing}",
+            issue.reference()
         ),
-        SelectError::NotFound if task.sub_tasks.is_empty() => {
-            anyhow::anyhow!("Task {} has no subtasks.", task.reference())
+        SelectError::NotFound if issue.sub_tasks.is_empty() => {
+            anyhow::anyhow!("Issue {} has no subtasks.", issue.reference())
         }
         SelectError::NotFound => anyhow::anyhow!(
-            "No subtask named `{selector}` on task {}, and it is not a position between 1 and {}:{listing}",
-            task.reference(),
-            task.sub_tasks.len()
+            "No subtask named `{selector}` on issue {}, and it is not a position between 1 and {}:{listing}",
+            issue.reference(),
+            issue.sub_tasks.len()
         ),
     }
 }

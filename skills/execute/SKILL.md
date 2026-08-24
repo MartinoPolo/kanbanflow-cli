@@ -1,7 +1,7 @@
 ---
 name: execute
-description: "Executes one KanbanFlow task end to end in its own worktree: grab, analyze, TDD implementation, review fixes, conventional commit, draft GitLab MR, pipeline green. Stops at the draft MR — reviewing, merging and finishing the task stay with the human."
-argument-hint: "<task-number> [--full-review]"
+description: "Executes one KanbanFlow issue end to end in its own worktree: grab, analyze, TDD implementation, review fixes, conventional commit, draft GitLab MR, pipeline green. Stops at the draft MR — reviewing, merging and finishing the issue stay with the human."
+argument-hint: "<issue-number> [--full-review]"
 disable-model-invocation: true
 allowed-tools: Bash(kf *), Bash(git *), Bash(glab *), Bash(yarn *), Read, Write, Agent
 metadata:
@@ -10,9 +10,9 @@ metadata:
   category: execution
 ---
 
-# Execute KanbanFlow Task
+# Execute KanbanFlow Issue
 
-Take one task from the board to a draft MR with a green pipeline. $ARGUMENTS
+Take one issue from the board to a draft MR with a green pipeline. $ARGUMENTS
 
 The main conversation is a pure orchestrator: sub-agents do the heavy phases and return
 bounded results. If a named `mp-*` agent type is not available in this session, do that
@@ -24,40 +24,40 @@ Read `${CLAUDE_SKILL_DIR}/../shared/KF_BASICS.md` and
 `${CLAUDE_SKILL_DIR}/../shared/KF_WORKFLOW.md` now. AGENTS.md § Definition of done is the
 completion bar for every implementation step.
 
-## Step 1: Read the task
+## Step 1: Read the issue
 
 ```bash
-kf task view E613 --download-attachments .mpx/tmp/E613 --json
+kf issue view E613 --download-attachments .mpx/tmp/E613 --json
 ```
 
-Read the attached images. Interpret the JSON per the `/kf:task-view` skill's field table:
+Read the attached images. Interpret the JSON per the `/kf:issue-view` skill's field table:
 unfinished `subTasks[]` are the remaining work, the newest comments supersede the
 description.
 
 ## Step 2: AFK gate
 
-Per [KF_WORKFLOW.md](../shared/KF_WORKFLOW.md) § AFK convention — the task must carry the
+Per [KF_WORKFLOW.md](../shared/KF_WORKFLOW.md) § AFK convention — the issue must carry the
 `AFK` label. Without it, stop before touching anything and ask the human: grill it now
-(`/kf:task-grill`), proceed on their explicit say-so, or abort. Also stop when
+(`/kf:issue-grill`), proceed on their explicit say-so, or abort. Also stop when
 `responsibleUserId` is a teammate (exit 3 territory — never `--force`).
 
 ## Step 3: Worktree and branch
 
 Per KF_WORKFLOW § Branch and worktree: reuse the worktree whose directory name contains
 the ticket, else create one from `origin/main` on `<author>/<ticket>-<slug>`. **Every
-later step runs inside the task's worktree.**
+later step runs inside the issue's worktree.**
 
 ## Step 4: Grab
 
 ```bash
-kf task grab E613 --json
+kf issue grab E613 --json
 ```
 
-Assigns the task to you and moves it to `wip`. Exit 3 → stop and ask the human.
+Assigns the issue to you and moves it to `wip`. Exit 3 → stop and ask the human.
 
 ## Step 5: Analyze
 
-Spawn `mp:mp-issue-analyzer` with: the task's name, description, comments and unfinished
+Spawn `mp:mp-issue-analyzer` with: the issue's name, description, comments and unfinished
 subtasks (from the Step 1 JSON), the worktree path, and a pointer to AGENTS.md. It returns
 the fix plan — files to touch, behaviors to implement, test strategy. On external-library
 uncertainty, spawn `mp:mp-context7-docs-fetcher` with the specific question.
@@ -82,7 +82,7 @@ commit, type from the diff, ticket stays out of the message.
 ## Step 9: Draft MR
 
 Follow the `mr` skill (`${CLAUDE_SKILL_DIR}/../mr/SKILL.md`): pre-MR gate (`yarn format`,
-`yarn lint`, `yarn test`), push, title `<TICKET>: <why>`, created **as draft**. The task
+`yarn lint`, `yarn test`), push, title `<TICKET>: <why>`, created **as draft**. The issue
 stays in `wip` — the human moves it to `review` after checking the work.
 
 ## Step 10: Board signal
@@ -117,6 +117,6 @@ MR:
 glab mr note <mr-number> --message "$(cat <file>)"
 ```
 
-Then report in the conversation: task, branch, worktree path, MR URL (draft), pipeline
-state, and what remains for the human — review, move the task to `review`, mark the MR
-ready, merge, `kf task finish`.
+Then report in the conversation: issue, branch, worktree path, MR URL (draft), pipeline
+state, and what remains for the human — review, move the issue to `review`, mark the MR
+ready, merge, `kf issue finish`.

@@ -1,6 +1,6 @@
 //! Which board user `kf` acts as, and turning user IDs into names for output.
 //!
-//! Task, comment and attachment payloads carry only user IDs. `GET /users` maps
+//! Issue, comment and attachment payloads carry only user IDs. `GET /users` maps
 //! them to names, but it costs a request out of the board's 1000/hour budget and
 //! only human output needs it — so the fetch happens lazily, at most once per
 //! invocation, and a failed fetch degrades to printing the raw IDs.
@@ -22,18 +22,16 @@ pub const USER_ID_ENV_VAR: &str = "KANBANFLOW_USER_ID";
 /// committed config: the environment variable first, so an agent or CI run can
 /// state it without touching any file, then the user-level board registry.
 ///
-/// A `userId` left in a config written by an older `kf init` is the last
-/// resort, and deliberately the weakest source — it may well have been
-/// committed by a teammate, in which case the registry's answer is the right
-/// one.
 pub fn my_user_id(config: &Config) -> Option<String> {
-    if let Some(user_id) = from_env() {
-        return Some(user_id);
-    }
-    if let Some(user_id) = boards::load().user_id(&config.board_id) {
-        return Some(user_id.to_string());
-    }
-    config.legacy_user_id.clone()
+    let registry = boards::load();
+    select_identity(from_env(), registry.user_id(&config.board_id))
+}
+
+fn select_identity(
+    environment_identity: Option<String>,
+    registry_identity: Option<&str>,
+) -> Option<String> {
+    environment_identity.or_else(|| registry_identity.map(str::to_string))
 }
 
 /// The identity from `KANBANFLOW_USER_ID`, if it is set and non-empty.
@@ -49,7 +47,7 @@ fn from_env() -> Option<String> {
 /// the same, `kf auth login`.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "`kf` does not know which user you are on board `{board_id}`, so it cannot tell your tasks \
+    "`kf` does not know which user you are on board `{board_id}`, so it cannot tell your issues \
      from a teammate's. Run `kf auth login --board {board_id} --user <you>` to record it, or set \
      {USER_ID_ENV_VAR}."
 )]
@@ -207,7 +205,56 @@ impl<'a> UserNames<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
     use super::*;
+
+    static ENVIRONMENT_MUTEX: Mutex<()> = Mutex::new(());
+    const IDENTITY_ENVIRONMENT_VARIABLES: [&str; 4] =
+        ["APPDATA", "XDG_CONFIG_HOME", "HOME", USER_ID_ENV_VAR];
+
+    struct EnvironmentGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        test_root: PathBuf,
+    }
+
+    impl EnvironmentGuard {
+        fn isolated() -> Self {
+            let test_root = std::env::temp_dir().join(format!(
+                "kf-user-legacy-identity-environment-{}",
+                std::process::id()
+            ));
+            std::fs::remove_dir_all(&test_root).ok();
+            let app_data = test_root.join("appdata");
+            std::fs::create_dir_all(&app_data).unwrap();
+            let saved = IDENTITY_ENVIRONMENT_VARIABLES
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect();
+            std::env::set_var("APPDATA", &app_data);
+            std::env::remove_var(USER_ID_ENV_VAR);
+            Self { saved, test_root }
+        }
+
+        fn config_path(&self) -> PathBuf {
+            self.test_root.join("legacy-config.json")
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+            std::fs::remove_dir_all(&self.test_root).ok();
+        }
+    }
 
     fn users() -> Vec<User> {
         vec![
@@ -222,6 +269,37 @@ mod tests {
                 email: None,
             },
         ]
+    }
+
+    #[test]
+    fn legacy_config_identity_is_not_an_identity_source() {
+        let _environment_lock = ENVIRONMENT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let environment = EnvironmentGuard::isolated();
+        let path = environment.config_path();
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":"B1","userId":"ULEGACY","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}"#,
+        )
+        .unwrap();
+        let config =
+            Config::load_from(&path).expect("current config loads with unknown legacy field");
+
+        assert_eq!(config.board_id, "B1");
+        assert_eq!(my_user_id(&config), None);
+    }
+
+    #[test]
+    fn identity_sources_prefer_the_environment_then_the_registry() {
+        assert_eq!(
+            select_identity(Some("UENV".to_string()), Some("UREGISTRY")),
+            Some("UENV".to_string())
+        );
+        assert_eq!(
+            select_identity(None, Some("UREGISTRY")),
+            Some("UREGISTRY".to_string())
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! `kf init` — verify the token, fetch the board, map columns to canonical
-//! states and write `.mpx/kanbanflow.json`.
+//! states and merge the KanbanFlow issues binding into `mpxconfig.json`.
 //!
 //! Interactive by default; fully scriptable with `--map` and `--user` so agents
 //! and CI can set a repo up without a terminal.
@@ -30,9 +30,10 @@ pub struct InitArgs {
     #[arg(long)]
     pub no_store: bool,
     /// Map a canonical state to a column, e.g. `--map wip="In progress"`.
-    /// Repeatable. Any use switches the mapping to non-interactive mode; states
-    /// left out stay unmapped. The column may be a name, a `uniqueId`, or a
-    /// 1-based index.
+    /// Repeatable. `todo`, `wip`, `review`, and `done` are required; `archive`
+    /// is optional. Each mapped state must use a distinct column. Any use
+    /// switches the mapping to non-interactive mode. The column may be a name,
+    /// a `uniqueId`, or a 1-based index.
     #[arg(long = "map", value_name = "STATE=COLUMN")]
     pub maps: Vec<String>,
     /// Use the stored token of this board (ID, name, or 1-based index from
@@ -43,8 +44,8 @@ pub struct InitArgs {
     /// per user, outside the repo; only asked for when it is not known yet.
     #[arg(long, value_name = "USER")]
     pub user: Option<String>,
-    /// Overwrite an existing `.mpx/kanbanflow.json`.
-    #[arg(long, visible_alias = "force")]
+    /// Retained for command-line stability; init always updates the issues binding.
+    #[arg(long, visible_alias = "force", hide = true)]
     pub overwrite: bool,
     /// Print the written configuration as JSON.
     #[arg(long)]
@@ -62,39 +63,36 @@ enum TokenSource {
 
 pub fn run(args: InitArgs) -> anyhow::Result<()> {
     let target_path = Config::default_path()?;
-    if target_path.exists() && !args.overwrite {
+    if !target_path.is_file() {
         anyhow::bail!(
-            "`{}` already exists. Pass --overwrite to replace it.",
-            target_path.display()
+            "`kf init` requires an existing valid `{CONFIG_RELATIVE_PATH}` in the current directory"
         );
     }
+    Config::validate_project_file(&target_path)?;
     let existing = load_existing_config(&target_path);
 
     let (api_token, source) = resolve_token(&args, existing.as_ref())?;
     let (client, board) = auth::verify_token(&api_token)?;
+    let states = resolve_states(&args, &board, &target_path)?;
+    let user_id = users::resolve_for_board(args.user.as_deref(), &client, &board.id)?;
+
     if !args.no_store && matches!(source, TokenSource::Argument | TokenSource::Prompt) {
         token::store(&board.id, &api_token)
             .with_context(|| format!("storing the token for board `{}`", board.id))?;
     }
 
-    let user_id = users::resolve_for_board(args.user.as_deref(), &client, &board.id)?;
     // Recorded even when the token was not stored: the identity has nowhere
     // else to live now that it is out of the committed config, and the registry
     // holds no secrets. Registering the board here is also what lets the next
     // repo skip the token entirely.
     auth::remember_board(&board.id, &board.name, Some(&user_id));
 
-    let states = resolve_states(&args, &board)?;
-
     let config = Config {
         board_id: board.id.clone(),
-        board_name: board.name.clone(),
-        legacy_user_id: None,
-        // Skill-owned key: preserved across re-init, never set by the CLI.
-        vcs: existing.and_then(|previous| previous.vcs),
+        board_name: Some(board.name.clone()),
         states,
     };
-    config.save_to(&target_path)?;
+    config.merge_into_file(&target_path)?;
 
     if args.json {
         // `userId` is reported although it is no longer part of the file, so a
@@ -118,15 +116,10 @@ pub fn run(args: InitArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The config already in place, if any — its board ID unlocks the stored token
-/// when re-initialising a repo for a board that is already set up.
+/// The valid target's existing issues binding, if present, whose board ID can
+/// unlock the stored token when re-initialising a repo.
 fn load_existing_config(target_path: &Path) -> Option<Config> {
-    let path = if target_path.exists() {
-        target_path.to_path_buf()
-    } else {
-        Config::find_path(&std::env::current_dir().ok()?)?
-    };
-    Config::load_from(&path).ok()
+    Config::load_from(target_path).ok()
 }
 
 /// Order: environment variable, explicit argument, the existing board's stored
@@ -223,12 +216,15 @@ fn choose_board(candidates: &[boards::KnownBoard]) -> anyhow::Result<Option<&boa
     }
 }
 
-fn resolve_states(args: &InitArgs, board: &Board) -> anyhow::Result<StateColumns> {
-    if !args.maps.is_empty() {
-        return build_state_columns(&args.maps, &board.columns);
-    }
-    require_terminal("--map <state>=<column>")?;
-    map_states_interactively(&board.columns)
+fn resolve_states(args: &InitArgs, board: &Board, path: &Path) -> anyhow::Result<StateColumns> {
+    let states = if !args.maps.is_empty() {
+        build_state_columns(&args.maps, &board.columns)?
+    } else {
+        require_terminal("--map <state>=<column>")?;
+        map_states_interactively(&board.columns)?
+    };
+    states.validate(path)?;
+    Ok(states)
 }
 
 /// Parse the repeatable `--map state=column` flag into a state mapping.
@@ -363,7 +359,11 @@ fn print_summary(
     no_store: bool,
 ) {
     println!("Wrote {}", path.display());
-    println!("Board: {} ({})", config.board_name, config.board_id);
+    println!(
+        "Board: {} ({})",
+        config.board_name.as_deref().unwrap_or("(unnamed)"),
+        config.board_id
+    );
     println!("User:  {user_id} (recorded for you only, not in the repo)");
     match source {
         TokenSource::Environment => println!(
@@ -406,7 +406,7 @@ mod tests {
     use super::*;
 
     fn columns() -> Vec<Column> {
-        ["To-do", "Do today", "In progress", "Done"]
+        ["To-do", "Do today", "In progress", "Review", "Done"]
             .iter()
             .enumerate()
             .map(|(index, name)| Column {
@@ -432,24 +432,28 @@ mod tests {
     }
 
     #[test]
-    fn build_state_columns_resolves_by_name_id_and_index() {
+    fn build_state_columns_resolves_a_complete_distinct_mapping() {
         let states = build_state_columns(
             &[
                 "todo=To-do".to_string(),
                 "wip=C2".to_string(),
-                "done=4".to_string(),
+                "review=Review".to_string(),
+                "done=5".to_string(),
             ],
             &columns(),
         )
-        .expect("all three references resolve");
+        .expect("all references resolve");
+        states
+            .validate(Path::new(CONFIG_RELATIVE_PATH))
+            .expect("complete distinct mapping validates");
         assert_eq!(states.get(CanonicalState::Todo), Some("C0"));
         assert_eq!(states.get(CanonicalState::Wip), Some("C2"));
-        assert_eq!(states.get(CanonicalState::Done), Some("C3"));
-        assert_eq!(states.get(CanonicalState::Review), None);
+        assert_eq!(states.get(CanonicalState::Review), Some("C3"));
+        assert_eq!(states.get(CanonicalState::Done), Some("C4"));
     }
 
     #[test]
-    fn build_state_columns_rejects_duplicates_and_unknown_columns() {
+    fn build_state_columns_rejects_repeated_states_and_unknown_columns() {
         let columns = columns();
         assert!(build_state_columns(
             &["todo=To-do".to_string(), "todo=Done".to_string()],
@@ -457,6 +461,34 @@ mod tests {
         )
         .is_err());
         assert!(build_state_columns(&["todo=Nowhere".to_string()], &columns).is_err());
+    }
+
+    #[test]
+    fn state_validation_rejects_incomplete_and_duplicate_column_mappings() {
+        let incomplete = build_state_columns(
+            &[
+                "todo=To-do".to_string(),
+                "wip=In progress".to_string(),
+                "done=Done".to_string(),
+            ],
+            &columns(),
+        )
+        .unwrap();
+        assert!(incomplete
+            .validate(Path::new(CONFIG_RELATIVE_PATH))
+            .is_err());
+
+        let duplicate = build_state_columns(
+            &[
+                "todo=To-do".to_string(),
+                "wip=In progress".to_string(),
+                "review=In progress".to_string(),
+                "done=Done".to_string(),
+            ],
+            &columns(),
+        )
+        .unwrap();
+        assert!(duplicate.validate(Path::new(CONFIG_RELATIVE_PATH)).is_err());
     }
 
     #[test]

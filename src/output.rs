@@ -1,10 +1,10 @@
 //! The agent output contract: `--json` gives raw pretty JSON, everything else
 //! gives hand-formatted, column-aligned tables. Write commands echo the
-//! affected task reference so a caller can chain without a second read.
+//! affected issue reference so a caller can chain without a second read.
 
 use serde::Serialize;
 
-use crate::api::models::Task;
+use crate::api::models::Issue;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutputError {
@@ -100,16 +100,16 @@ fn display_width(text: &str) -> usize {
     text.chars().count()
 }
 
-/// Confirm a write by echoing the affected task's reference and ID.
-pub fn print_affected_task(task: &Task) {
-    print_affected(&task.id, task.number.as_ref().map(ToString::to_string));
+/// Confirm a write by echoing the affected issue's reference and ID.
+pub fn print_affected_issue(issue: &Issue) {
+    print_affected(&issue.id, issue.number.as_ref().map(ToString::to_string));
 }
 
 /// Same, when only the ID (and possibly a number) is at hand — e.g. after create.
-pub fn print_affected(task_id: &str, number: Option<String>) {
+pub fn print_affected(issue_id: &str, number: Option<String>) {
     match number {
-        Some(number) => println!("{number} ({task_id})"),
-        None => println!("{task_id}"),
+        Some(number) => println!("{number} ({issue_id})"),
+        None => println!("{issue_id}"),
     }
 }
 

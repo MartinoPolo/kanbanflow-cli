@@ -47,6 +47,6 @@ ticket is ambiguous: report, skip the move.
 
 Create `providers/<NAME>.md` beside this file with the same sections — preconditions,
 listing commands, ticket matching, verdict mapping — and teach the repo's
-`.mpx/kanbanflow.json` the value: `"vcs": "<name>"`. For Gerrit, the natural signals
+`mpxconfig.json` the value: `"repository": { "provider": "<name>", ... }`. For Gerrit, the natural signals
 are the change's `status` (`NEW`/`MERGED`), its WIP flag for the draft verdict, and
 the ticket in the commit-message topic or footer.
