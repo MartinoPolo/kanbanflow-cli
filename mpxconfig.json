@@ -1,9 +1,5 @@
 {
-  "$schema": "https://mpx.dev/schemas/mpxconfig.schema.json",
-  "schemaVersion": 1,
-  "project": {
-    "id": "MartinoPolo/kanbanflow-cli"
-  },
+  "projectId": "MartinoPolo/kanbanflow-cli",
   "repository": {
     "provider": "github",
     "remote": "origin"
