@@ -30,9 +30,9 @@ pub struct InitArgs {
     #[arg(long)]
     pub no_store: bool,
     /// Map a canonical state to a column, e.g. `--map wip="In progress"`.
-    /// Repeatable. `todo`, `wip`, `review`, and `done` are required; `archive`
-    /// is optional. Each mapped state must use a distinct column. Any use
-    /// switches the mapping to non-interactive mode. The column may be a name,
+    /// Repeatable. `todo`, `wip`, `review`, and `done` are required; `backlog`
+    /// and `archive` are optional. Each mapped state must use a distinct column.
+    /// Any use switches the mapping to non-interactive mode. The column may be a name,
     /// a `uniqueId`, or a 1-based index.
     #[arg(long = "map", value_name = "STATE=COLUMN")]
     pub maps: Vec<String>,
@@ -326,10 +326,11 @@ fn map_states_interactively(columns: &[Column]) -> anyhow::Result<StateColumns> 
 }
 
 /// A first guess per state from the column's name, so the common board layout
-/// maps with five presses of Enter.
+/// maps by accepting each suggestion.
 fn suggest_column(state: CanonicalState, columns: &[Column]) -> Option<&Column> {
     let keywords: &[&str] = match state {
-        CanonicalState::Todo => &["to-do", "todo", "to do", "backlog", "inbox"],
+        CanonicalState::Backlog => &["backlog"],
+        CanonicalState::Todo => &["to-do", "todo", "to do", "inbox"],
         CanonicalState::Wip => &["in progress", "in-progress", "wip", "doing"],
         CanonicalState::Review => &["review", "in review", "qa", "testing"],
         CanonicalState::Done => &["done", "completed", "finished"],
@@ -406,15 +407,22 @@ mod tests {
     use super::*;
 
     fn columns() -> Vec<Column> {
-        ["To-do", "Do today", "In progress", "Review", "Done"]
-            .iter()
-            .enumerate()
-            .map(|(index, name)| Column {
-                name: (*name).to_string(),
-                unique_id: format!("C{index}"),
-                description: None,
-            })
-            .collect()
+        [
+            "Backlog",
+            "To-do",
+            "Do today",
+            "In progress",
+            "Review",
+            "Done",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Column {
+            name: (*name).to_string(),
+            unique_id: format!("C{index}"),
+            description: None,
+        })
+        .collect()
     }
 
     #[test]
@@ -435,10 +443,11 @@ mod tests {
     fn build_state_columns_resolves_a_complete_distinct_mapping() {
         let states = build_state_columns(
             &[
+                "backlog=Backlog".to_string(),
                 "todo=To-do".to_string(),
-                "wip=C2".to_string(),
+                "wip=C3".to_string(),
                 "review=Review".to_string(),
-                "done=5".to_string(),
+                "done=6".to_string(),
             ],
             &columns(),
         )
@@ -446,10 +455,30 @@ mod tests {
         states
             .validate(Path::new(CONFIG_RELATIVE_PATH))
             .expect("complete distinct mapping validates");
-        assert_eq!(states.get(CanonicalState::Todo), Some("C0"));
-        assert_eq!(states.get(CanonicalState::Wip), Some("C2"));
-        assert_eq!(states.get(CanonicalState::Review), Some("C3"));
-        assert_eq!(states.get(CanonicalState::Done), Some("C4"));
+        assert_eq!(states.get(CanonicalState::Backlog), Some("C0"));
+        assert_eq!(states.get(CanonicalState::Todo), Some("C1"));
+        assert_eq!(states.get(CanonicalState::Wip), Some("C3"));
+        assert_eq!(states.get(CanonicalState::Review), Some("C4"));
+        assert_eq!(states.get(CanonicalState::Done), Some("C5"));
+    }
+
+    #[test]
+    fn build_state_columns_allows_optional_backlog_to_be_omitted() {
+        let states = build_state_columns(
+            &[
+                "todo=To-do".to_string(),
+                "wip=In progress".to_string(),
+                "review=Review".to_string(),
+                "done=Done".to_string(),
+            ],
+            &columns(),
+        )
+        .expect("all references resolve");
+
+        states
+            .validate(Path::new(CONFIG_RELATIVE_PATH))
+            .expect("backlog is optional");
+        assert_eq!(states.get(CanonicalState::Backlog), None);
     }
 
     #[test]
@@ -492,8 +521,12 @@ mod tests {
     }
 
     #[test]
-    fn suggest_column_guesses_the_usual_layout() {
+    fn suggest_column_guesses_backlog_separately_from_todo() {
         let columns = columns();
+        assert_eq!(
+            suggest_column(CanonicalState::Backlog, &columns).map(|column| column.name.as_str()),
+            Some("Backlog")
+        );
         assert_eq!(
             suggest_column(CanonicalState::Todo, &columns).map(|column| column.name.as_str()),
             Some("To-do")

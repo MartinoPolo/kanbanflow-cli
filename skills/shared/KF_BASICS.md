@@ -23,7 +23,7 @@ Shared contract for every `kf-` skill. `kf` is the KanbanFlow CLI (`gh`-style gr
 | Term | Meaning |
 | --- | --- |
 | Issue | A unit of board work. Referenced as `E613` (number) or a raw ID like `T3s6UGyzY`. |
-| Canonical state | `todo`, `wip`, `review`, `done`, `archive` — mapped to real columns per board. |
+| Canonical state | `backlog`, `todo`, `wip`, `review`, `done`, `archive` — mapped to real columns per board. |
 | Label | Area/project tag. **Never created implicitly**; only existing labels can be applied. |
 | Color | Issue color. Work convention: **red = bug/critical**, **green = normal**. |
 | Subtask | Checklist item, addressed by exact name or 1-based position. |

@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::api::models::{
-    Attachment, Comment, CreateComment, CreateCommentResponse, CreateIssue, CreateIssueResponse,
-    Issue, IssueGroup, Label, SubTask, SubTaskPayload, UpdateIssue,
+    Attachment, Board, Column, Comment, CreateComment, CreateCommentResponse, CreateIssue,
+    CreateIssueResponse, Issue, IssueGroup, Label, SubTask, SubTaskPayload, UpdateIssue,
 };
 use crate::api::{ApiError, Client};
 use crate::config::{CanonicalState, Config, ConfigError};
@@ -37,7 +37,7 @@ pub enum IssueCommand {
     List(ListArgs),
     /// Change an issue's fields.
     Edit(EditArgs),
-    /// Move an issue to a canonical workflow state.
+    /// Move an issue to a canonical state or board column.
     Move(MoveArgs),
     /// Delete an issue.
     Delete(DeleteArgs),
@@ -176,12 +176,22 @@ pub struct EditArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("target")
+        .required(true)
+        .multiple(false)
+        .args(["to", "column"])
+))]
 pub struct MoveArgs {
     /// Issue number (`E613`) or issue ID.
     pub issue: String,
-    /// Target canonical state.
+    /// Target canonical state. Required unless `--column` is used.
     #[arg(long, value_enum, ignore_case = true)]
-    pub to: CanonicalState,
+    pub to: Option<CanonicalState>,
+    /// Target board column by exact ID or unique name. Name matching ignores
+    /// ASCII case only; non-ASCII characters must match exactly.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub column: Option<String>,
     /// Grouping date (`YYYY-MM-DD`) when the target column is date grouped.
     /// Omitted, the server files the issue under today's UTC date.
     #[arg(long, value_name = "YYYY-MM-DD")]
@@ -773,27 +783,85 @@ fn changed_labels(current: &[Label], added: &[String], removed: &[String]) -> Op
 
 fn move_issue(context: &Context, args: MoveArgs) -> anyhow::Result<()> {
     let issue = resolve::resolve_issue_named(&context.client, &args.issue)?;
-    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
-        .with_context(|| format!("moving issue {} to {}", issue.reference(), args.to))?;
-    let column_id = context.config.column_id(args.to)?.to_string();
-    if let Some(date) = &args.grouping_date {
-        ensure_iso_date(date)?;
-    }
-
-    // groupingDate is omitted unless asked for: on a date-grouped column the
-    // server then files the issue under today's UTC date, which is what a move
-    // into Done means anyway.
-    let update = UpdateIssue {
-        column_id: Some(column_id),
-        grouping_date: args.grouping_date,
-        ..Default::default()
+    let target_description = match (args.to, args.column.as_deref()) {
+        (Some(state), None) => state.to_string(),
+        (None, Some(column)) => format!("column `{column}`"),
+        _ => anyhow::bail!("exactly one of `--to` or `--column` is required"),
     };
+    guard::ensure_can_mutate(&issue, context.my_user_id()?, args.force)
+        .with_context(|| format!("moving issue {} to {target_description}", issue.reference()))?;
+
+    let column_id = if let Some(state) = args.to {
+        context.config.column_id(state)?.to_string()
+    } else {
+        let column = args
+            .column
+            .as_deref()
+            .expect("target choice was validated above");
+        let board: Board = context
+            .client
+            .get_json("board", &[])
+            .context("reading board columns for `--column`")?;
+        resolve_move_column(&board.columns, column)?.to_string()
+    };
+    let update = build_move_update(column_id, args.grouping_date)?;
     context
         .client
         .post_json_discard(&format!("tasks/{}", issue.id), &update)
-        .with_context(|| format!("moving issue {} to {}", issue.reference(), args.to))?;
+        .with_context(|| format!("moving issue {} to {target_description}", issue.reference()))?;
     output::print_affected_issue(&issue);
     Ok(())
+}
+
+fn resolve_move_column<'a>(columns: &'a [Column], needle: &str) -> anyhow::Result<&'a str> {
+    let needle = needle.trim();
+    if let Some(column) = columns.iter().find(|column| column.unique_id == needle) {
+        return Ok(&column.unique_id);
+    }
+
+    let matches: Vec<_> = columns
+        .iter()
+        .filter(|column| column.name.eq_ignore_ascii_case(needle))
+        .collect();
+    match matches.as_slice() {
+        [column] => Ok(&column.unique_id),
+        [] => anyhow::bail!(
+            "no column ID or name matches `{needle}`. Known columns: {}",
+            describe_move_columns(columns)
+        ),
+        matches => anyhow::bail!(
+            "column name `{needle}` is ambiguous; use one of these exact IDs: {}",
+            matches
+                .iter()
+                .map(|column| column.unique_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn describe_move_columns(columns: &[Column]) -> String {
+    columns
+        .iter()
+        .map(|column| format!("{} ({})", column.name, column.unique_id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_move_update(
+    column_id: String,
+    grouping_date: Option<String>,
+) -> anyhow::Result<UpdateIssue> {
+    if let Some(date) = &grouping_date {
+        ensure_iso_date(date)?;
+    }
+    // groupingDate is omitted unless asked for: on a date-grouped column the
+    // server then files the issue under today's UTC date.
+    Ok(UpdateIssue {
+        column_id: Some(column_id),
+        grouping_date,
+        ..Default::default()
+    })
 }
 
 fn delete(context: &Context, args: DeleteArgs) -> anyhow::Result<()> {
@@ -1048,8 +1116,128 @@ fn is_iso_date(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
     use super::*;
     use crate::config::StateColumns;
+
+    fn read_http_request(stream: &mut TcpStream) -> std::io::Result<String> {
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let bytes_read = stream.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..bytes_read]);
+
+            let Some(header_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                break;
+            }
+        }
+        String::from_utf8(request)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    fn start_json_server(
+        response_bodies: Vec<&'static str>,
+    ) -> (String, JoinHandle<std::io::Result<Vec<String>>>) {
+        start_json_server_with_accept_timeout(response_bodies, Duration::from_secs(5))
+    }
+
+    fn start_json_server_with_accept_timeout(
+        response_bodies: Vec<&'static str>,
+        expected_request_timeout: Duration,
+    ) -> (String, JoinHandle<std::io::Result<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || -> std::io::Result<Vec<String>> {
+            listener.set_nonblocking(true)?;
+            let expected_request_count = response_bodies.len();
+            let mut requests = Vec::new();
+            for (request_index, body) in response_bodies.into_iter().enumerate() {
+                let deadline = Instant::now() + expected_request_timeout;
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    format!(
+                                        "missing expected HTTP request {} of {}",
+                                        request_index + 1,
+                                        expected_request_count
+                                    ),
+                                ));
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                requests.push(read_http_request(&mut stream)?);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                stream.flush()?;
+            }
+
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests.push(read_http_request(&mut stream)?);
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )?;
+                        stream.flush()?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(requests)
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn request_line(request: &str) -> &str {
+        request.lines().next().expect("request line")
+    }
+
+    fn request_body(request: &str) -> serde_json::Value {
+        serde_json::from_str(
+            request
+                .split_once("\r\n\r\n")
+                .expect("request has headers")
+                .1,
+        )
+        .expect("request body is JSON")
+    }
 
     fn labels(names: &[&str]) -> Vec<Label> {
         names
@@ -1065,7 +1253,8 @@ mod tests {
     /// case `--open` has to decide about.
     fn board() -> Vec<IssueGroup> {
         serde_json::from_str(
-            r#"[{"columnId":"CTODO","columnName":"To-do","tasks":[]},
+            r#"[{"columnId":"CBACKLOG","columnName":"Backlog","tasks":[]},
+                {"columnId":"CTODO","columnName":"To-do","tasks":[]},
                 {"columnId":"CWIP","columnName":"In progress","tasks":[]},
                 {"columnId":"CTODAY","columnName":"Do today","tasks":[]},
                 {"columnId":"CDONE","columnName":"Done","tasks":[]}]"#,
@@ -1078,6 +1267,7 @@ mod tests {
             board_id: "F2QMK1B".to_string(),
             board_name: Some("My first board".to_string()),
             states: StateColumns {
+                backlog: Some("CBACKLOG".to_string()),
                 todo: Some("CTODO".to_string()),
                 wip: Some("CWIP".to_string()),
                 review: None,
@@ -1108,10 +1298,14 @@ mod tests {
 
     #[test]
     fn several_states_select_the_union_of_their_columns() {
-        let args = list_args(&[CanonicalState::Todo, CanonicalState::Wip], None, false);
+        let args = list_args(
+            &[CanonicalState::Backlog, CanonicalState::Todo],
+            None,
+            false,
+        );
         assert_eq!(
             kept_columns(&board(), &args).expect("both states are mapped"),
-            ["To-do", "In progress"]
+            ["Backlog", "To-do"]
         );
     }
 
@@ -1126,14 +1320,14 @@ mod tests {
         ));
     }
 
-    /// `--open` filters by exclusion, so a lane the board invented — "Do today" —
-    /// stays in the answer instead of being dropped for having no canonical state.
+    /// `--open` filters by exclusion, so Backlog and a lane the board invented —
+    /// "Do today" — stay in the answer instead of being dropped.
     #[test]
     fn open_drops_only_the_closed_columns() {
         let args = list_args(&[], None, true);
         assert_eq!(
             kept_columns(&board(), &args).expect("done is mapped"),
-            ["To-do", "In progress", "Do today"]
+            ["Backlog", "To-do", "In progress", "Do today"]
         );
     }
 
@@ -1158,16 +1352,213 @@ mod tests {
         let groups = board();
         assert_eq!(
             kept_columns(&groups, &list_args(&[], None, false)).expect("no filter"),
-            ["To-do", "In progress", "Do today", "Done"]
+            ["Backlog", "To-do", "In progress", "Do today", "Done"]
         );
         assert_eq!(
             kept_columns(&groups, &list_args(&[], Some("in PROGRESS"), false)).expect("by name"),
             ["In progress"]
         );
         assert!(
-            kept_columns(&groups, &list_args(&[], Some("Backlog"), false))
+            kept_columns(&groups, &list_args(&[], Some("Future"), false))
                 .expect("unknown name")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn json_server_times_out_when_an_expected_request_is_missing() {
+        let (_base_url, server) =
+            start_json_server_with_accept_timeout(vec!["{}"], Duration::from_millis(30));
+
+        let error = server
+            .join()
+            .expect("test server thread did not panic")
+            .expect_err("missing request must time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("missing expected HTTP request 1 of 1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn move_column_lookup_prefers_exact_id_over_names() {
+        let columns = vec![
+            crate::api::models::Column {
+                name: "Target".to_string(),
+                unique_id: "C-TARGET".to_string(),
+                description: None,
+            },
+            crate::api::models::Column {
+                name: "C-TARGET".to_string(),
+                unique_id: "C-OTHER".to_string(),
+                description: None,
+            },
+        ];
+
+        assert_eq!(
+            resolve_move_column(&columns, "C-TARGET").unwrap(),
+            "C-TARGET"
+        );
+    }
+
+    #[test]
+    fn move_column_lookup_accepts_unique_ascii_case_insensitive_name() {
+        let columns = vec![
+            crate::api::models::Column {
+                name: "Do today".to_string(),
+                unique_id: "C-TODAY".to_string(),
+                description: None,
+            },
+            crate::api::models::Column {
+                name: "À faire".to_string(),
+                unique_id: "C-NON-ASCII".to_string(),
+                description: None,
+            },
+        ];
+
+        assert_eq!(
+            resolve_move_column(&columns, "do TODAY").unwrap(),
+            "C-TODAY"
+        );
+        assert_eq!(
+            resolve_move_column(&columns, "À faire").unwrap(),
+            "C-NON-ASCII"
+        );
+        assert!(resolve_move_column(&columns, "à faire").is_err());
+    }
+
+    #[test]
+    fn move_column_lookup_rejects_unknown_ambiguous_and_numeric_index() {
+        let columns = vec![
+            crate::api::models::Column {
+                name: "Waiting".to_string(),
+                unique_id: "C-WAIT-ONE".to_string(),
+                description: None,
+            },
+            crate::api::models::Column {
+                name: "waiting".to_string(),
+                unique_id: "C-WAIT-TWO".to_string(),
+                description: None,
+            },
+        ];
+
+        let ambiguous = resolve_move_column(&columns, "WAITING")
+            .expect_err("duplicate names must require an ID")
+            .to_string();
+        assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
+        assert!(ambiguous.contains("C-WAIT-ONE"), "{ambiguous}");
+        assert!(ambiguous.contains("C-WAIT-TWO"), "{ambiguous}");
+
+        let unknown = resolve_move_column(&columns, "Missing")
+            .expect_err("unknown names must fail")
+            .to_string();
+        assert!(unknown.contains("Known columns"), "{unknown}");
+
+        assert!(resolve_move_column(&columns, "1").is_err());
+    }
+
+    #[test]
+    fn move_update_contains_column_and_optional_grouping_date() {
+        let update = build_move_update("C-DONE".to_string(), Some("2026-07-31".to_string()))
+            .expect("valid grouping date");
+        assert_eq!(
+            serde_json::to_value(update).unwrap(),
+            serde_json::json!({"columnId": "C-DONE", "groupingDate": "2026-07-31"})
+        );
+        assert_eq!(
+            serde_json::to_value(build_move_update("C-TODO".to_string(), None).unwrap()).unwrap(),
+            serde_json::json!({"columnId": "C-TODO"})
+        );
+        assert!(build_move_update("C-DONE".to_string(), Some("31/07/2026".to_string())).is_err());
+    }
+
+    #[test]
+    fn move_to_named_column_resolves_issue_checks_guard_reads_board_then_posts() {
+        let (base_url, server) = start_json_server(vec![
+            r#"{"_id":"T3s6UGyzY","name":"Write report","columnId":"CTODO","responsibleUserId":"UME"}"#,
+            r#"{"_id":"BOARD","name":"Work","columns":[{"name":"Do today","uniqueId":"CTODAY"}]}"#,
+            "",
+        ]);
+        let context = Context::for_test(
+            board_config(),
+            Client::with_base_url("test-token".to_string(), base_url).expect("build test client"),
+            Some("UME".to_string()),
+        );
+
+        move_issue(
+            &context,
+            MoveArgs {
+                issue: "T3s6UGyzY".to_string(),
+                to: None,
+                column: Some("do TODAY".to_string()),
+                grouping_date: Some("2026-07-31".to_string()),
+                force: false,
+            },
+        )
+        .expect("move succeeds");
+        let requests = server
+            .join()
+            .expect("test server thread did not panic")
+            .expect("test server handled requests");
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request_line(request))
+                .collect::<Vec<_>>(),
+            [
+                "GET /tasks/T3s6UGyzY HTTP/1.1",
+                "GET /board HTTP/1.1",
+                "POST /tasks/T3s6UGyzY HTTP/1.1"
+            ]
+        );
+        assert_eq!(
+            request_body(&requests[2]),
+            serde_json::json!({"columnId": "CTODAY", "groupingDate": "2026-07-31"})
+        );
+    }
+
+    #[test]
+    fn move_to_named_column_stops_after_guard_rejection() {
+        let (base_url, server) = start_json_server(vec![
+            r#"{"_id":"T3s6UGyzY","name":"Write report","columnId":"CTODO","responsibleUserId":"UOTHER"}"#,
+        ]);
+        let context = Context::for_test(
+            board_config(),
+            Client::with_base_url("test-token".to_string(), base_url).expect("build test client"),
+            Some("UME".to_string()),
+        );
+
+        let error = move_issue(
+            &context,
+            MoveArgs {
+                issue: "T3s6UGyzY".to_string(),
+                to: None,
+                column: Some("Do today".to_string()),
+                grouping_date: None,
+                force: false,
+            },
+        )
+        .expect_err("a teammate's issue is guarded");
+        let requests = server
+            .join()
+            .expect("test server thread did not panic")
+            .expect("test server handled requests");
+
+        assert!(matches!(
+            error.downcast_ref::<crate::guard::GuardError>(),
+            Some(crate::guard::GuardError::NotMine { .. })
+        ));
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request_line(request))
+                .collect::<Vec<_>>(),
+            ["GET /tasks/T3s6UGyzY HTTP/1.1"]
         );
     }
 

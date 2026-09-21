@@ -49,4 +49,13 @@ impl Context {
     pub fn my_user_id_optional(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(config: Config, client: Client, user_id: Option<String>) -> Self {
+        Self {
+            config,
+            client,
+            user_id,
+        }
+    }
 }

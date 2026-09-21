@@ -90,4 +90,17 @@ mod tests {
         assert!(Cli::try_parse_from(["kf", "issue", "list"]).is_ok());
         assert!(Cli::try_parse_from(["kf", "task", "list"]).is_err());
     }
+
+    #[test]
+    fn issue_move_requires_exactly_one_target() {
+        assert!(Cli::try_parse_from(["kf", "issue", "move", "E613"]).is_err());
+        assert!(Cli::try_parse_from([
+            "kf", "issue", "move", "E613", "--to", "done", "--column", "Done"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["kf", "issue", "move", "E613", "--to", "backlog"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["kf", "issue", "move", "E613", "--column", "Do today"]).is_ok()
+        );
+    }
 }

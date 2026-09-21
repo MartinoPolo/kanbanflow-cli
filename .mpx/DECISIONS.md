@@ -26,7 +26,7 @@ Public prose, modules, and commands use Issue and `kf issue`. KanbanFlow's upstr
 
 ### Canonical workflow states live in the root project config
 
-`kf issue move --to todo|wip|review|done|archive` resolves through the `issues.metadata.states` mapping in root `mpxconfig.json`. `todo`, `wip`, `review`, and `done` are required; `archive` is optional. Every mapped state uses a distinct column so reverse lookup is unambiguous.
+`kf issue move --to backlog|todo|wip|review|done|archive` resolves through the `issues.metadata.states` mapping in root `mpxconfig.json`. `todo`, `wip`, `review`, and `done` are required; `backlog` and `archive` are optional. `--column` accepts an exact board column ID or a unique name for unmapped lanes. Name matching ignores ASCII case only, so non-ASCII characters must match exactly. Every mapped state uses a distinct column so reverse lookup is unambiguous.
 
 ### Init updates an existing manifest only
 

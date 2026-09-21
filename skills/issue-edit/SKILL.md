@@ -79,8 +79,10 @@ Batch changes into a single `kf issue edit` call rather than one call per field.
 kf issue move E613 --to review
 ```
 
-States: `todo`, `wip`, `review`, `done`, `archive`. `--grouping-date YYYY-MM-DD` only when the
-target column is date-grouped and the human wants a date other than today.
+States: `backlog`, `todo`, `wip`, `review`, `done`, `archive`. For a board column with no
+canonical mapping, use `--column <name-or-id>` instead of `--to`; duplicate names require an exact
+ID. `--grouping-date YYYY-MM-DD` applies when the target column is date-grouped and the human wants
+a date other than today.
 
 ## End of work: finish
 

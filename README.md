@@ -46,7 +46,7 @@ API tokens are **per board** and require a KanbanFlow premium plan; create one i
 | `kf issue create --name ...` | Create an issue; assigned to you unless `--responsible none` |
 | `kf issue grab E613` | Assign to yourself, move to `wip`, print the view |
 | `kf issue finish E613 --comment-file F` | Closing comment, optional subtask check-off, move to `done` |
-| `kf issue move E613 --to review` | Move an issue to a canonical state |
+| `kf issue move E613 --to review` | Move an issue to a canonical state, or use `--column NAME_OR_ID` for an unmapped board column |
 | `kf comment add E613 --text ...` | Comment on any issue — never blocked by the guardrail |
 | `kf attach add E613 shot.png` | Upload files onto an issue |
 | `kf attach download E613 --dir DIR` | Pull attachments down before their links expire |
@@ -104,7 +104,7 @@ kf auth login --board "Team E" --user you@example.com
 only `issues.metadata`, preserving unrelated project, repository, issue metadata, and unknown state
 fields. It never writes tokens or users. `projectId` may be any non-empty string. `repository` is
 optional; when present, it needs a `github`, `gitlab`, or `gerrit` provider and a non-empty remote.
-`boardName` and `archive` are optional; the four workflow states are required.
+`boardName`, `backlog`, and `archive` are optional; `todo`, `wip`, `review`, and `done` are required.
 
 To migrate an older config, move `project.id` to root `projectId`, remove `schemaVersion`, and move
 `issues.boardId`, `issues.boardName`, and `issues.states` under `issues.metadata`.
@@ -119,6 +119,7 @@ To migrate an older config, move `project.id` to root `projectId`, remove `schem
       "boardId": "BEXAMPLE",
       "boardName": "Example board",
       "states": {
+        "backlog": "CBACKLOG",
         "todo": "CTODO",
         "wip": "CWIP",
         "review": "CREVIEW",

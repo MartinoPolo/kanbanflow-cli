@@ -47,6 +47,7 @@ pub enum ConfigError {
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum CanonicalState {
+    Backlog,
     Todo,
     Wip,
     Review,
@@ -55,7 +56,8 @@ pub enum CanonicalState {
 }
 
 impl CanonicalState {
-    pub const ALL: [CanonicalState; 5] = [
+    pub const ALL: [CanonicalState; 6] = [
+        Self::Backlog,
         Self::Todo,
         Self::Wip,
         Self::Review,
@@ -65,6 +67,7 @@ impl CanonicalState {
     pub const CLOSED: [CanonicalState; 2] = [Self::Done, Self::Archive];
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Backlog => "backlog",
             Self::Todo => "todo",
             Self::Wip => "wip",
             Self::Review => "review",
@@ -82,13 +85,14 @@ impl std::str::FromStr for CanonicalState {
     type Err = String;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.trim().to_ascii_lowercase().as_str() {
+            "backlog" => Ok(Self::Backlog),
             "todo" | "to-do" | "to_do" => Ok(Self::Todo),
             "wip" | "in-progress" | "inprogress" => Ok(Self::Wip),
             "review" => Ok(Self::Review),
             "done" => Ok(Self::Done),
             "archive" | "archived" => Ok(Self::Archive),
             other => Err(format!(
-                "unknown state `{other}`; expected one of todo, wip, review, done, archive"
+                "unknown state `{other}`; expected one of backlog, todo, wip, review, done, archive"
             )),
         }
     }
@@ -96,6 +100,8 @@ impl std::str::FromStr for CanonicalState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateColumns {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +116,7 @@ pub struct StateColumns {
 impl StateColumns {
     pub fn get(&self, state: CanonicalState) -> Option<&str> {
         match state {
+            CanonicalState::Backlog => &self.backlog,
             CanonicalState::Todo => &self.todo,
             CanonicalState::Wip => &self.wip,
             CanonicalState::Review => &self.review,
@@ -120,6 +127,7 @@ impl StateColumns {
     }
     pub fn set(&mut self, state: CanonicalState, column_id: Option<String>) {
         *match state {
+            CanonicalState::Backlog => &mut self.backlog,
             CanonicalState::Todo => &mut self.todo,
             CanonicalState::Wip => &mut self.wip,
             CanonicalState::Review => &mut self.review,
@@ -131,7 +139,9 @@ impl StateColumns {
         let mut mapped_columns = std::collections::HashMap::new();
         for state in CanonicalState::ALL {
             let column_id = self.get(state);
-            if state != CanonicalState::Archive && column_id.is_none_or(|id| id.trim().is_empty()) {
+            if !matches!(state, CanonicalState::Backlog | CanonicalState::Archive)
+                && column_id.is_none_or(|id| id.trim().is_empty())
+            {
                 return Err(invalid(
                     path,
                     &format!("`issues.metadata.states.{state}` must be a non-empty column ID"),
@@ -427,6 +437,7 @@ mod tests {
             board_id: "F2QMK1B".into(),
             board_name: Some("My first board".into()),
             states: StateColumns {
+                backlog: None,
                 todo: Some("C0".into()),
                 wip: Some("C1".into()),
                 review: Some("C2".into()),
@@ -491,6 +502,7 @@ mod tests {
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.board_id, "B1");
         assert_eq!(config.board_name, None);
+        assert_eq!(config.states.get(CanonicalState::Backlog), None);
         std::fs::remove_file(path).ok();
     }
 
@@ -647,7 +659,7 @@ mod tests {
                             "wip": "C1",
                             "review": "C2",
                             "done": "C3",
-                            "backlog": "CBACKLOG"
+                            "futureState": "CFUTURE"
                         }
                     }
                 }
@@ -730,7 +742,7 @@ mod tests {
                     "futureMetadataValue": {"preserve": true},
                     "states": {
                         "archive": "COLDARCHIVE",
-                        "backlog": "CBACKLOG",
+                        "futureState": "CFUTURE",
                         "futureStateValue": {"nested": "keep"}
                     }
                 }
@@ -757,7 +769,7 @@ mod tests {
                     "wip": "C1",
                     "review": "C2",
                     "done": "C3",
-                    "backlog": "CBACKLOG",
+                    "futureState": "CFUTURE",
                     "futureStateValue": {"nested": "keep"}
                 }
             }
@@ -850,12 +862,45 @@ mod tests {
         let mut states = sample().states;
         states.review = states.wip.clone();
         assert!(states.validate(Path::new(CONFIG_RELATIVE_PATH)).is_err());
+
+        let mut states = sample().states;
+        states.backlog = Some("  ".into());
+        assert!(states.validate(Path::new(CONFIG_RELATIVE_PATH)).is_err());
+
+        let mut states = sample().states;
+        states.backlog = states.todo.clone();
+        assert!(states.validate(Path::new(CONFIG_RELATIVE_PATH)).is_err());
     }
     #[test]
-    fn canonical_state_parses_aliases_and_rejects_junk() {
+    fn canonical_state_parses_backlog_and_rejects_junk() {
+        assert_eq!("BACKLOG".parse(), Ok(CanonicalState::Backlog));
         assert_eq!("TODO".parse(), Ok(CanonicalState::Todo));
         assert_eq!(" in-progress ".parse(), Ok(CanonicalState::Wip));
-        assert!("backlog".parse::<CanonicalState>().is_err());
+        assert!("queued".parse::<CanonicalState>().is_err());
+    }
+    #[test]
+    fn merge_serializes_optional_backlog_mapping() {
+        let path = temp("merge-backlog.json");
+        std::fs::write(&path, r#"{"projectId":"project"}"#).unwrap();
+        let mut config = sample();
+        config.states.backlog = Some("CBACKLOG".into());
+
+        config.merge_into_file(&path).unwrap();
+
+        let document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            document["issues"]["metadata"]["states"]["backlog"],
+            "CBACKLOG"
+        );
+        assert_eq!(
+            Config::load_from(&path)
+                .unwrap()
+                .column_id(CanonicalState::Backlog)
+                .unwrap(),
+            "CBACKLOG"
+        );
+        std::fs::remove_file(path).ok();
     }
     #[test]
     fn column_lookup_is_bidirectional() {

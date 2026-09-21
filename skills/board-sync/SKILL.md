@@ -80,8 +80,8 @@ Strongest evidence wins:
 | No MR, but a local branch/worktree with the ticket | `wip`        |
 | No trace anywhere                             | current (no move) |
 
-**Forward-only rule**: rank `todo` < `wip` < `review` < `done`. Move an issue only when
-its expected state outranks its current one. An issue in a column with no canonical
+**Forward-only rule**: rank `backlog` < `todo` < `wip` < `review` < `done`. Move an issue only
+when its expected state outranks its current one. An issue in a column with no canonical
 state (a board's own "Do today") ranks as `todo` for this comparison — flag it in the
 report so the human sees the skill's reading.
 

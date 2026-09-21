@@ -10,7 +10,7 @@
 
 **Column** — A board lane holding workflow state.
 
-**Canonical state** — The CLI abstraction `todo | wip | review | done | archive`, mapped to real column IDs per project.
+**Canonical state** — The CLI abstraction `backlog | todo | wip | review | done | archive`, mapped to real column IDs per project.
 
 **Label** — An existing area or project tag. The CLI never creates labels implicitly.
 

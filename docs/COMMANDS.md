@@ -15,7 +15,7 @@ responsible user **or** a collaborator makes it yours.
 - [label](#label) — [list](#label-list)
 - [board](#board)
 
-Canonical states everywhere: `todo`, `wip`, `review`, `done`, `archive`.
+Canonical states everywhere: `backlog`, `todo`, `wip`, `review`, `done`, `archive`.
 Issue colors everywhere: `yellow`, `white`, `red`, `green`, `blue`, `purple`, `orange`, `cyan`,
 `brown`, `magenta`.
 
@@ -46,12 +46,12 @@ kf init [OPTIONS]
 | `--token-stdin` | — | Read the token as a single line from stdin. | off |
 | `--board` | `BOARD` | Use the stored token of this board (ID, name, or 1-based index from `kf auth status`). Skips the question when several boards are logged in. | one board: it; several: asks |
 | `--no-store` | — | Do not save the token in the OS credential store. | stores |
-| `--map` | `STATE=COLUMN` | Map a canonical state to a column; repeatable. Any use switches mapping to non-interactive mode. `todo`, `wip`, `review`, and `done` are required; `archive` is optional. Each mapped state must use a distinct column. `COLUMN` may be a name, a `uniqueId`, or a 1-based index. | interactive |
+| `--map` | `STATE=COLUMN` | Map a canonical state to a column; repeatable. Any use switches mapping to non-interactive mode. `todo`, `wip`, `review`, and `done` are required; `backlog` and `archive` are optional. Each mapped state must use a distinct column. `COLUMN` may be a name, a `uniqueId`, or a 1-based index. | interactive |
 | `--user` | `USER` | Which board member you are: user ID, full name, or email. Recorded for you only, never written to the repo. | the recorded identity, else interactive |
 | `--json` | — | Print the resulting configuration as JSON, plus the `userId` this run settled on. | human |
 
 ```bash
-kf init --map todo=To-do --map wip="In progress" --map review=Review --map done=Done --user U9kJ2b --json
+kf init --map backlog=Backlog --map todo=To-do --map wip="In progress" --map review=Review --map done=Done --user U9kJ2b --json
 ```
 
 ---
@@ -246,20 +246,23 @@ kf issue edit E613 --append-description "Repro on Safari 17." --add-label bug
 
 ### issue move
 
-Move an issue to a canonical workflow state. `--json`: no. **Guarded** (`--force`).
+Move an issue to a canonical state or directly to a board column. `--json`: no. **Guarded**
+(`--force`). Exactly one of `--to` and `--column` is required.
 
 ```
-kf issue move <ISSUE> --to <TO> [OPTIONS]
+kf issue move <ISSUE> <--to <STATE>|--column <NAME_OR_ID>> [OPTIONS]
 ```
 
 | Flag | Value | Effect | Default |
 | --- | --- | --- | --- |
-| `--to` | state | Target canonical state. **Required.** | — |
+| `--to` | state | Target canonical state, resolved through `mpxconfig.json`. | — |
+| `--column` | `NAME_OR_ID` | Target board column by exact ID or unique name. Name matching ignores ASCII case only; non-ASCII characters must match exactly. Duplicate names require an ID; numeric indexes are not accepted. | — |
 | `--grouping-date` | `YYYY-MM-DD` | Grouping date when the target column is date grouped. | server: today UTC |
 | `--force` | — | Mutate an issue that is not yours. | off |
 
 ```bash
 kf issue move E613 --to done --grouping-date 2026-07-31
+kf issue move E613 --column "Do today"
 ```
 
 ### issue delete
