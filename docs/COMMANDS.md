@@ -23,8 +23,10 @@ Issue colors everywhere: `yellow`, `white`, `red`, `green`, `blue`, `purple`, `o
 
 ## init
 
-Update the KanbanFlow `issues` binding in an existing valid `mpxconfig.json`: verify the token
-and map columns to canonical states while preserving all other root fields. `--json`: yes. Guarded: no.
+Set `issues.provider` and update KanbanFlow board data under `issues.metadata` in an existing valid
+`mpxconfig.json`: verify the token and map columns to canonical states while preserving unrelated
+root, metadata, and state fields. The root needs a non-empty `projectId`; `repository` is optional.
+`--json`: yes. Guarded: no.
 
 Token order: `KANBANFLOW_TOKEN`, `--token`/`--token-stdin`, the stored token of the board this repo
 is already wired to, the stored token of a logged-in board (`--board`, or a question when several

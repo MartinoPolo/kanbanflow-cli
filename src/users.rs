@@ -280,7 +280,7 @@ mod tests {
         let path = environment.config_path();
         std::fs::write(
             &path,
-            r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":"B1","userId":"ULEGACY","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}"#,
+            r#"{"projectId":"project","issues":{"provider":"kanbanflow","userId":"ULEGACY","metadata":{"boardId":"B1","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}}"#,
         )
         .unwrap();
         let config =

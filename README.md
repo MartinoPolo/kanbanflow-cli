@@ -100,24 +100,30 @@ kf auth login --board "Team E" --user you@example.com
 
 ## `mpxconfig.json`
 
-`kf init` requires this committed MPX project config to exist. It updates only the `issues`
-binding, preserving project, repository, tooling, and unknown root fields. It never writes tokens
-or users. `boardName` and `archive` are optional; the four workflow states are required.
+`kf init` requires this committed MPX project config to exist. It sets `issues.provider` and updates
+only `issues.metadata`, preserving unrelated project, repository, issue metadata, and unknown state
+fields. It never writes tokens or users. `projectId` may be any non-empty string. `repository` is
+optional; when present, it needs a `github`, `gitlab`, or `gerrit` provider and a non-empty remote.
+`boardName` and `archive` are optional; the four workflow states are required.
+
+To migrate an older config, move `project.id` to root `projectId`, remove `schemaVersion`, and move
+`issues.boardId`, `issues.boardName`, and `issues.states` under `issues.metadata`.
 
 ```json
 {
-  "schemaVersion": 1,
-  "project": { "id": "acme/widget" },
-  "repository": { "provider": "gitlab", "remote": "git@example/acme/widget.git" },
+  "projectId": "acme/widget",
+  "repository": { "provider": "gitlab", "remote": "origin" },
   "issues": {
     "provider": "kanbanflow",
-    "boardId": "BEXAMPLE",
-    "boardName": "Example board",
-    "states": {
-      "todo": "CTODO",
-      "wip": "CWIP",
-      "review": "CREVIEW",
-      "done": "CDONE"
+    "metadata": {
+      "boardId": "BEXAMPLE",
+      "boardName": "Example board",
+      "states": {
+        "todo": "CTODO",
+        "wip": "CWIP",
+        "review": "CREVIEW",
+        "done": "CDONE"
+      }
     }
   }
 }

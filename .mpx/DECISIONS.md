@@ -26,11 +26,11 @@ Public prose, modules, and commands use Issue and `kf issue`. KanbanFlow's upstr
 
 ### Canonical workflow states live in the root project config
 
-`kf issue move --to todo|wip|review|done|archive` resolves through the `issues.states` mapping in root `mpxconfig.json`. `todo`, `wip`, `review`, and `done` are required; `archive` is optional. Every mapped state uses a distinct column so reverse lookup is unambiguous.
+`kf issue move --to todo|wip|review|done|archive` resolves through the `issues.metadata.states` mapping in root `mpxconfig.json`. `todo`, `wip`, `review`, and `done` are required; `archive` is optional. Every mapped state uses a distinct column so reverse lookup is unambiguous.
 
 ### Init updates an existing manifest only
 
-`kf init` requires a pre-existing valid root `mpxconfig.json`. It replaces only the `issues` binding while preserving project, repository, tooling, unknown fields, and all other unrelated root configuration. It never creates a new manifest.
+`kf init` requires a pre-existing valid root `mpxconfig.json`. It sets `issues.provider` and updates only `issues.metadata` while preserving unrelated root, issue, metadata, and state fields. It never creates a new manifest.
 
 The shared file is updated through a sibling temporary file and rename so a failed write cannot truncate unrelated project configuration.
 

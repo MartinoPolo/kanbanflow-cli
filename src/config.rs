@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const CONFIG_RELATIVE_PATH: &str = "mpxconfig.json";
-pub const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -135,7 +134,7 @@ impl StateColumns {
             if state != CanonicalState::Archive && column_id.is_none_or(|id| id.trim().is_empty()) {
                 return Err(invalid(
                     path,
-                    &format!("`issues.states.{state}` must be a non-empty column ID"),
+                    &format!("`issues.metadata.states.{state}` must be a non-empty column ID"),
                 ));
             }
             let Some(column_id) = column_id else {
@@ -144,14 +143,14 @@ impl StateColumns {
             if column_id.trim().is_empty() {
                 return Err(invalid(
                     path,
-                    &format!("`issues.states.{state}` must be a non-empty column ID when present"),
+                    &format!("`issues.metadata.states.{state}` must be a non-empty column ID when present"),
                 ));
             }
             if let Some(previous_state) = mapped_columns.insert(column_id, state) {
                 return Err(invalid(
                     path,
                     &format!(
-                        "`issues.states.{state}` and `issues.states.{previous_state}` must use distinct columns"
+                        "`issues.metadata.states.{state}` and `issues.metadata.states.{previous_state}` must use distinct columns"
                     ),
                 ));
             }
@@ -160,7 +159,7 @@ impl StateColumns {
     }
 }
 
-/// Runtime view of `issues` when its provider is KanbanFlow.
+/// Runtime view of `issues.metadata` when its provider is KanbanFlow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(rename = "boardId")]
@@ -193,21 +192,18 @@ impl Config {
     }
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let document = read_document(path)?;
-        validate_schema_version(&document, path)?;
+        validate_project_document(&document, path)?;
         let issues = document
             .get("issues")
             .ok_or_else(|| invalid(path, "missing `issues` binding"))?;
         if issues.get("provider").and_then(Value::as_str) != Some("kanbanflow") {
             return Err(invalid(path, "`issues.provider` must be `kanbanflow`"));
         }
-        let config: Self = serde_json::from_value(issues.clone())
-            .map_err(|source| invalid(path, &format!("invalid issues binding: {source}")))?;
-        config.validate(path)?;
-        Ok(config)
+        deserialize_kanbanflow_metadata(issues, path)
     }
     fn validate(&self, path: &Path) -> Result<(), ConfigError> {
         if self.board_id.trim().is_empty() {
-            return Err(invalid(path, "`issues.boardId` must not be empty"));
+            return Err(invalid(path, "`issues.metadata.boardId` must not be empty"));
         }
         self.states.validate(path)
     }
@@ -220,7 +216,14 @@ impl Config {
     }
     pub fn validate_project_file(path: &Path) -> Result<(), ConfigError> {
         let document = read_document(path)?;
-        validate_project_document(&document, path)
+        validate_project_document(&document, path)?;
+        if let Some(issues) = document
+            .get("issues")
+            .filter(|issues| issues.get("provider").and_then(Value::as_str) == Some("kanbanflow"))
+        {
+            deserialize_kanbanflow_metadata(issues, path)?;
+        }
+        Ok(())
     }
     pub fn merge_into_file(&self, path: &Path) -> Result<(), ConfigError> {
         let mut document = read_document(path)?;
@@ -229,30 +232,25 @@ impl Config {
         let root = document
             .as_object_mut()
             .ok_or_else(|| invalid(path, "root must be an object"))?;
-        let issues = root
-            .entry("issues")
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if !issues.is_object() {
-            *issues = Value::Object(serde_json::Map::new());
-        }
-        let issues = issues.as_object_mut().expect("issues object");
+        let issues = object_field(root, "issues");
         issues.insert("provider".into(), Value::String("kanbanflow".into()));
-        issues.insert("boardId".into(), Value::String(self.board_id.clone()));
-        if let Some(board_name) = &self.board_name {
-            issues.insert("boardName".into(), Value::String(board_name.clone()));
-        } else {
-            issues.remove("boardName");
-        }
+        issues.remove("boardId");
+        issues.remove("boardName");
+        issues.remove("states");
         issues.remove("token");
         issues.remove("userId");
 
-        let states = issues
-            .entry("states")
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if !states.is_object() {
-            *states = Value::Object(serde_json::Map::new());
+        let metadata = object_field(issues, "metadata");
+        metadata.insert("boardId".into(), Value::String(self.board_id.clone()));
+        if let Some(board_name) = &self.board_name {
+            metadata.insert("boardName".into(), Value::String(board_name.clone()));
+        } else {
+            metadata.remove("boardName");
         }
-        let states = states.as_object_mut().expect("states object");
+        metadata.remove("token");
+        metadata.remove("userId");
+
+        let states = object_field(metadata, "states");
         for state in CanonicalState::ALL {
             if let Some(column_id) = self.states.get(state) {
                 states.insert(state.as_str().into(), Value::String(column_id.to_string()));
@@ -341,39 +339,55 @@ fn read_document(path: &Path) -> Result<Value, ConfigError> {
         source,
     })
 }
-fn validate_schema_version(document: &Value, path: &Path) -> Result<(), ConfigError> {
-    if document.get("schemaVersion").and_then(Value::as_u64) != Some(SCHEMA_VERSION) {
-        return Err(invalid(path, "`schemaVersion` must be 1"));
-    }
-    if !document.is_object() {
-        return Err(invalid(path, "root must be an object"));
-    }
-    Ok(())
+fn deserialize_kanbanflow_metadata(issues: &Value, path: &Path) -> Result<Config, ConfigError> {
+    let metadata = issues
+        .get("metadata")
+        .ok_or_else(|| invalid(path, "missing `issues.metadata`"))?;
+    let config = Config::deserialize(metadata)
+        .map_err(|source| invalid(path, &format!("invalid issues metadata: {source}")))?;
+    config.validate(path)?;
+    Ok(config)
 }
-fn validate_project_document(document: &Value, path: &Path) -> Result<(), ConfigError> {
-    validate_schema_version(document, path)?;
-    let project_id = document
-        .pointer("/project/id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid(path, "`project.id` must be a string"))?;
-    validate_project_id(project_id, path)?;
 
-    let repository_provider = document
-        .pointer("/repository/provider")
+fn validate_project_document(document: &Value, path: &Path) -> Result<(), ConfigError> {
+    let root = document
+        .as_object()
+        .ok_or_else(|| invalid(path, "root must be an object"))?;
+    if root
+        .get("projectId")
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid(path, "`repository.provider` must be a string"))?;
-    if !matches!(
-        repository_provider,
-        "github" | "gitlab" | "gerrit" | "generic"
-    ) {
+        .is_none_or(|project_id| project_id.trim().is_empty())
+    {
+        return Err(invalid(path, "`projectId` must be a non-empty string"));
+    }
+
+    let Some(repository) = root.get("repository") else {
+        return Ok(());
+    };
+    let repository = repository
+        .as_object()
+        .ok_or_else(|| invalid(path, "`repository` must be an object when present"))?;
+    if let Some(unsupported_key) = repository
+        .keys()
+        .find(|key| !matches!(key.as_str(), "provider" | "remote"))
+    {
         return Err(invalid(
             path,
-            "`repository.provider` must be one of github, gitlab, gerrit, generic",
+            &format!("unsupported repository key `repository.{unsupported_key}`"),
         ));
     }
-
-    if document
-        .pointer("/repository/remote")
+    let repository_provider = repository
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(path, "`repository.provider` must be a string"))?;
+    if !matches!(repository_provider, "github" | "gitlab" | "gerrit") {
+        return Err(invalid(
+            path,
+            "`repository.provider` must be one of github, gitlab, gerrit",
+        ));
+    }
+    if repository
+        .get("remote")
         .and_then(Value::as_str)
         .is_none_or(|remote| remote.trim().is_empty())
     {
@@ -385,43 +399,17 @@ fn validate_project_document(document: &Value, path: &Path) -> Result<(), Config
     Ok(())
 }
 
-fn validate_project_id(project_id: &str, path: &Path) -> Result<(), ConfigError> {
-    if project_id.len() > 129 {
-        return Err(invalid(path, "`project.id` must be at most 129 characters"));
+fn object_field<'a>(
+    object: &'a mut serde_json::Map<String, Value>,
+    field: &str,
+) -> &'a mut serde_json::Map<String, Value> {
+    let value = object
+        .entry(field)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !value.is_object() {
+        *value = Value::Object(serde_json::Map::new());
     }
-    let segments: Vec<_> = project_id.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|segment| segment.is_empty()) {
-        return Err(invalid(
-            path,
-            "`project.id` must contain exactly two non-empty slash-separated segments",
-        ));
-    }
-    for segment in segments {
-        if segment.len() > 64 {
-            return Err(invalid(
-                path,
-                "each `project.id` segment must be at most 64 characters",
-            ));
-        }
-        if !segment
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-            || !segment
-                .as_bytes()
-                .last()
-                .is_some_and(u8::is_ascii_alphanumeric)
-            || !segment
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
-            return Err(invalid(
-                path,
-                "`project.id` segments must start and end with an ASCII alphanumeric character and contain only ASCII alphanumeric characters, `.`, `_`, or `-`",
-            ));
-        }
-    }
-    Ok(())
+    value.as_object_mut().expect("object field")
 }
 
 fn invalid(path: &Path, message: &str) -> ConfigError {
@@ -454,8 +442,10 @@ mod tests {
     #[test]
     fn does_not_discover_a_valid_looking_legacy_config() {
         let root = temp("search");
+        std::fs::remove_dir_all(&root).ok();
         let nested = root.join("a/b");
         std::fs::create_dir_all(root.join(".mpx")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(
             root.join(".mpx").join("kanbanflow.json"),
@@ -495,50 +485,70 @@ mod tests {
         std::fs::remove_dir_all(outer).ok();
     }
     #[test]
-    fn loads_valid_kanbanflow_issues_binding() {
+    fn loads_current_binding_without_repository_and_with_arbitrary_project_id() {
         let path = temp("load.json");
-        std::fs::write(&path, r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":"B1","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}"#).unwrap();
+        std::fs::write(&path, r#"{"projectId":" project with spaces / and symbols ! ","issues":{"provider":"kanbanflow","metadata":{"boardId":"B1","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}}"#).unwrap();
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.board_id, "B1");
         assert_eq!(config.board_name, None);
         std::fs::remove_file(path).ok();
     }
+
     #[test]
-    fn rejects_wrong_schema_provider_and_unusable_mapping() {
+    fn rejects_malformed_current_fields_and_unusable_mapping() {
         for json in [
-            r#"{"schemaVersion":2,"issues":{"provider":"kanbanflow"}}"#,
-            r#"{"schemaVersion":1,"issues":{"provider":"github"}}"#,
-            r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":"B","states":{"todo":"C"}}}"#,
-            r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":"B","states":{"todo":"C0","wip":"C1","review":"C1","done":"C3"}}}"#,
+            r#"[]"#,
+            r#"{"projectId":" "}"#,
+            r#"{"projectId":42}"#,
+            r#"{"projectId":"project","repository":null}"#,
+            r#"{"projectId":"project","repository":{"provider":"generic","remote":"origin"}}"#,
+            r#"{"projectId":"project","repository":{"provider":"github","remote":" "}}"#,
+            r#"{"projectId":"project","issues":{"provider":"github","metadata":{}}}"#,
+            r#"{"projectId":"project","issues":{"provider":"kanbanflow","metadata":{"boardId":"B","states":{"todo":"C"}}}}"#,
+            r#"{"projectId":"project","issues":{"provider":"kanbanflow","metadata":{"boardId":"B","states":{"todo":"C0","wip":"C1","review":"C1","done":"C3"}}}}"#,
         ] {
             let path = temp("invalid.json");
             std::fs::write(&path, json).unwrap();
-            assert!(Config::load_from(&path).is_err());
+            assert!(Config::load_from(&path).is_err(), "accepted {json}");
             std::fs::remove_file(path).ok();
         }
     }
+
     #[test]
-    fn invalid_issues_binding_types_are_reported_as_invalid_config() {
+    fn rejects_legacy_only_issues_binding() {
+        let path = temp("legacy-only-binding.json");
+        std::fs::write(&path, r#"{"projectId":"project","issues":{"provider":"kanbanflow","boardId":"B1","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}"#).unwrap();
+
+        assert!(Config::load_from(&path).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn invalid_issues_metadata_types_are_reported_as_invalid_config() {
         let path = temp("invalid-binding-type.json");
         std::fs::write(
             &path,
-            r#"{"schemaVersion":1,"issues":{"provider":"kanbanflow","boardId":42,"states":{}}}"#,
+            r#"{"projectId":"project","issues":{"provider":"kanbanflow","metadata":{"boardId":42,"states":{}}}}"#,
         )
         .unwrap();
 
         let error = Config::load_from(&path).expect_err("wrong field type must fail");
         match error {
             ConfigError::Invalid { message, .. } => {
-                assert!(message.starts_with("invalid issues binding: "), "{message}");
+                assert!(
+                    message.starts_with("invalid issues metadata: "),
+                    "{message}"
+                );
             }
             other => panic!("expected invalid config error, got {other}"),
         }
         std::fs::remove_file(path).ok();
     }
+
     #[test]
     fn init_merge_rejects_an_incomplete_mpx_project_document_without_changing_it() {
         let path = temp("incomplete.json");
-        let original = br#"{"schemaVersion":1}"#;
+        let original = br#"{"repository":{"provider":"github","remote":"origin"}}"#;
         std::fs::write(&path, original).unwrap();
 
         assert!(sample().merge_into_file(&path).is_err());
@@ -547,59 +557,58 @@ mod tests {
     }
 
     #[test]
-    fn project_validation_enforces_known_mpx_v1_constraints() {
-        let valid = serde_json::json!({
-            "schemaVersion": 1,
-            "project": {"id": "group/project", "futureProjectValue": true},
-            "repository": {
-                "provider": "gitlab",
-                "remote": "ssh://example.test/group/project.git",
-                "futureRepositoryValue": [1, 2]
-            },
-            "futureRootValue": {"preserved": true}
-        });
+    fn project_validation_accepts_current_schema_and_checks_optional_repository() {
+        let valid_documents = [
+            serde_json::json!({
+                "projectId": "a project ID with no path restriction",
+                "futureRootValue": {"preserved": true}
+            }),
+            serde_json::json!({
+                "projectId": "project",
+                "repository": {
+                    "provider": "gitlab",
+                    "remote": "ssh://example.test/group/project.git"
+                }
+            }),
+        ];
         let invalid_documents = [
-            ("one-segment", serde_json::json!("x"), None, None),
+            ("non-object-root", serde_json::json!([])),
+            ("missing-project-id", serde_json::json!({})),
+            ("non-string-project-id", serde_json::json!({"projectId": 2})),
+            ("blank-project-id", serde_json::json!({"projectId": " \t "})),
             (
-                "bad-character",
-                serde_json::json!("group/pro ject"),
-                None,
-                None,
-            ),
-            (
-                "overlong-segment",
-                serde_json::json!(format!("group/{}", "x".repeat(65))),
-                None,
-                None,
+                "non-object-repository",
+                serde_json::json!({"projectId": "project", "repository": "origin"}),
             ),
             (
                 "bogus-provider",
-                serde_json::json!("group/project"),
-                Some("bogus"),
-                None,
+                serde_json::json!({"projectId": "project", "repository": {"provider": "generic", "remote": "origin"}}),
             ),
             (
                 "blank-remote",
-                serde_json::json!("group/project"),
-                None,
-                Some(" \t "),
+                serde_json::json!({"projectId": "project", "repository": {"provider": "github", "remote": " "}}),
+            ),
+            (
+                "unsupported-repository-key",
+                serde_json::json!({
+                    "projectId": "project",
+                    "repository": {
+                        "provider": "github",
+                        "remote": "origin",
+                        "futureRepositoryValue": [1, 2]
+                    }
+                }),
             ),
         ];
 
-        let valid_path = temp("valid-project-document.json");
-        std::fs::write(&valid_path, serde_json::to_vec(&valid).unwrap()).unwrap();
-        Config::validate_project_file(&valid_path).expect("known and unknown fields are valid");
-        std::fs::remove_file(valid_path).ok();
+        for (index, document) in valid_documents.into_iter().enumerate() {
+            let path = temp(&format!("valid-project-document-{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+            Config::validate_project_file(&path).expect("current project document is valid");
+            std::fs::remove_file(path).ok();
+        }
 
-        for (name, project_id, provider, remote) in invalid_documents {
-            let mut document = valid.clone();
-            document["project"]["id"] = project_id;
-            if let Some(provider) = provider {
-                document["repository"]["provider"] = serde_json::json!(provider);
-            }
-            if let Some(remote) = remote {
-                document["repository"]["remote"] = serde_json::json!(remote);
-            }
+        for (name, document) in invalid_documents {
             let path = temp(&format!("invalid-project-{name}.json"));
             std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
             assert!(
@@ -614,20 +623,90 @@ mod tests {
     }
 
     #[test]
+    fn project_validation_requires_valid_metadata_for_kanbanflow_bindings() {
+        let valid_documents = [
+            serde_json::json!({"projectId": "project"}),
+            serde_json::json!({
+                "projectId": "project",
+                "issues": {
+                    "provider": "github",
+                    "boardId": "legacy-value-is-ignored",
+                    "states": "also ignored"
+                }
+            }),
+            serde_json::json!({
+                "projectId": "project",
+                "issues": {
+                    "provider": "kanbanflow",
+                    "futureIssueValue": true,
+                    "metadata": {
+                        "boardId": "B1",
+                        "futureMetadataValue": true,
+                        "states": {
+                            "todo": "C0",
+                            "wip": "C1",
+                            "review": "C2",
+                            "done": "C3",
+                            "backlog": "CBACKLOG"
+                        }
+                    }
+                }
+            }),
+        ];
+        let invalid_documents = [
+            serde_json::json!({
+                "projectId": "project",
+                "issues": {
+                    "provider": "kanbanflow",
+                    "boardId": "B1",
+                    "states": {"todo": "C0", "wip": "C1", "review": "C2", "done": "C3"}
+                }
+            }),
+            serde_json::json!({
+                "projectId": "project",
+                "issues": {"provider": "kanbanflow", "metadata": "invalid"}
+            }),
+            serde_json::json!({
+                "projectId": "project",
+                "issues": {
+                    "provider": "kanbanflow",
+                    "metadata": {
+                        "boardId": "B1",
+                        "states": {"todo": "C0", "wip": "C1", "review": "C2"}
+                    }
+                }
+            }),
+        ];
+
+        for (index, document) in valid_documents.into_iter().enumerate() {
+            let path = temp(&format!("valid-issues-binding-{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+            Config::validate_project_file(&path).expect("supported issues binding is valid");
+            std::fs::remove_file(path).ok();
+        }
+
+        for (index, document) in invalid_documents.into_iter().enumerate() {
+            let path = temp(&format!("invalid-issues-binding-{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    Config::validate_project_file(&path),
+                    Err(ConfigError::Invalid { .. })
+                ),
+                "malformed KanbanFlow binding should be rejected: {document}"
+            );
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
     fn merge_preserves_unrelated_and_unknown_root_fields_and_is_stable() {
         let path = temp("merge.json");
         let original = serde_json::json!({
-            "schemaVersion": 1,
-            "project": {
-                "id": "group/project",
-                "name": "Project Name",
-                "future": {"owners": ["alpha", "beta"], "locked": true}
-            },
+            "projectId": "project with arbitrary identifier characters / !",
             "repository": {
                 "provider": "gitlab",
-                "remote": "ssh://git@example.test/group/project.git",
-                "defaultBranch": "main",
-                "future": {"mirror": {"enabled": false}}
+                "remote": "ssh://git@example.test/group/project.git"
             },
             "tooling": {
                 "language": "rust",
@@ -645,9 +724,15 @@ mod tests {
                 "userId": "legacy-user",
                 "token": "legacy-token",
                 "futureIssueValue": {"replace": true},
-                "states": {
-                    "archive": "COLDARCHIVE",
-                    "futureStateValue": {"nested": "keep"}
+                "metadata": {
+                    "userId": "metadata-user",
+                    "token": "metadata-token",
+                    "futureMetadataValue": {"preserve": true},
+                    "states": {
+                        "archive": "COLDARCHIVE",
+                        "backlog": "CBACKLOG",
+                        "futureStateValue": {"nested": "keep"}
+                    }
                 }
             }
         });
@@ -662,20 +747,26 @@ mod tests {
         let mut expected = original;
         expected["issues"] = serde_json::json!({
             "provider": "kanbanflow",
-            "boardId": "F2QMK1B",
-            "boardName": "My first board",
             "futureIssueValue": {"replace": true},
-            "states": {
-                "todo": "C0",
-                "wip": "C1",
-                "review": "C2",
-                "done": "C3",
-                "futureStateValue": {"nested": "keep"}
+            "metadata": {
+                "boardId": "F2QMK1B",
+                "boardName": "My first board",
+                "futureMetadataValue": {"preserve": true},
+                "states": {
+                    "todo": "C0",
+                    "wip": "C1",
+                    "review": "C2",
+                    "done": "C3",
+                    "backlog": "CBACKLOG",
+                    "futureStateValue": {"nested": "keep"}
+                }
             }
         });
         assert_eq!(value, expected);
         assert!(value["issues"].get("userId").is_none());
         assert!(value["issues"].get("token").is_none());
+        assert!(value["issues"]["metadata"].get("userId").is_none());
+        assert!(value["issues"]["metadata"].get("token").is_none());
         std::fs::remove_file(path).ok();
     }
     #[test]
@@ -683,7 +774,7 @@ mod tests {
         let path = temp("merge-non-object-states.json");
         std::fs::write(
             &path,
-            r#"{"schemaVersion":1,"project":{"id":"a/b"},"repository":{"provider":"generic","remote":"x"},"issues":{"provider":"github","boardName":"Old name","future":true,"states":"invalid"}}"#,
+            r#"{"projectId":"project","issues":{"provider":"github","future":true,"metadata":{"boardName":"Old name","futureMetadata":true,"states":"invalid"}}}"#,
         )
         .unwrap();
         let mut config = sample();
@@ -692,10 +783,11 @@ mod tests {
         config.merge_into_file(&path).unwrap();
         let document: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(document["issues"].get("boardName").is_none());
+        assert!(document["issues"]["metadata"].get("boardName").is_none());
         assert_eq!(document["issues"]["future"], true);
+        assert_eq!(document["issues"]["metadata"]["futureMetadata"], true);
         assert_eq!(
-            document["issues"]["states"],
+            document["issues"]["metadata"]["states"],
             serde_json::json!({"todo": "C0", "wip": "C1", "review": "C2", "done": "C3"})
         );
         std::fs::remove_file(path).ok();
@@ -729,7 +821,7 @@ mod tests {
     #[test]
     fn legacy_user_id_is_not_part_of_config_identity_and_is_removed_by_init_merge() {
         let path = temp("legacy-identity.json");
-        std::fs::write(&path, r#"{"schemaVersion":1,"project":{"id":"a/b"},"repository":{"provider":"gitlab","remote":"x"},"issues":{"provider":"kanbanflow","boardId":"B1","userId":"U1","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}"#).unwrap();
+        std::fs::write(&path, r#"{"projectId":"project","issues":{"provider":"kanbanflow","userId":"U1","metadata":{"boardId":"B1","userId":"UMETADATA","states":{"todo":"C0","wip":"C1","review":"C2","done":"C3"}}}}"#).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
         let runtime_value = serde_json::to_value(&loaded).unwrap();
@@ -739,6 +831,7 @@ mod tests {
         let document: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(document["issues"].get("userId").is_none());
+        assert!(document["issues"]["metadata"].get("userId").is_none());
         std::fs::remove_file(path).ok();
     }
     #[test]
