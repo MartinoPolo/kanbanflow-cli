@@ -150,6 +150,7 @@ kf issue create --name <NAME> [OPTIONS]
 | --- | --- | --- | --- |
 | `--name` | `NAME` | Issue name. **Required.** | — |
 | `--description` | `TEXT` | Issue description, Markdown as the board renders it. | empty |
+| `--description-file` | `FILE` | Read the description from a file; conflicts with `--description`. | — |
 | `--color` | color | Issue color. | board default |
 | `--to` | state | Canonical state (column) to create the issue in. | `todo` |
 | `--label` | `NAME` | Existing board label to apply; repeatable. Unknown labels are refused. | none |
@@ -232,6 +233,8 @@ kf issue edit <ISSUE> [OPTIONS]
 | --- | --- | --- |
 | `--name` | `NAME` | Replace the issue name. |
 | `--description` | `TEXT` | Replace the description. |
+| `--description-file` | `FILE` | Replace the description with the contents of a file. |
+| `--description-file` | `FILE` | Replace the description with the contents of a file. |
 | `--append-description` | `TEXT` | Append to the description after a blank line (lossless merge). |
 | `--color` | color | Issue color. |
 | `--add-label` | `NAME` | Add an existing board label; repeatable. |

@@ -1,8 +1,10 @@
-//! Turning server-supplied attachment names into safe, collision-free paths.
+//! Local files: safe, collision-free paths for server-supplied attachment
+//! names, and text read for `--…-file` flags.
 //!
 //! Attachment names come from the API and are attacker-influenced on a shared
 //! board, so they are reduced to a single harmless file name before any write.
 
+use anyhow::Context as _;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -44,6 +46,13 @@ pub fn safe_file_name(name: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Text for a `--…-file` flag. Agents pass Markdown this way because shell
+/// command substitution is blocked in many sandboxes.
+pub fn read_text(path: &Path, purpose: &str) -> anyhow::Result<String> {
+    std::fs::read_to_string(path)
+        .with_context(|| format!("reading the {purpose} from {}", path.display()))
 }
 
 #[cfg(test)]

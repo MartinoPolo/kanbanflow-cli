@@ -66,7 +66,7 @@ Unassigned issues grab freely; a teammate's issue needs `--force`, so exit 3 her
 - **New evidence**: `kf attach add E613 ./screenshots/after-fix.png`
 - **Checklist**: `kf subtask check E613 "Reproduce on staging"` (exact name or 1-based
   position); `kf subtask add E613 "<step>"` when the work grew.
-- **Metadata**: `kf issue edit E613 --name`, `--description` (replaces — prefer
+- **Metadata**: `kf issue edit E613 --name`, `--description` or `--description-file` (replace — prefer
   `--append-description`), `--color red|green`, `--add-label <name>`, `--remove-label <name>`,
   `--responsible me|<userId>|none`. Labels must already exist on the board; an unknown name is
   refused with the full list.

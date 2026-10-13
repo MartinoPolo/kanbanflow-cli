@@ -103,4 +103,45 @@ mod tests {
             Cli::try_parse_from(["kf", "issue", "move", "E613", "--column", "Do today"]).is_ok()
         );
     }
+
+    #[test]
+    fn description_file_excludes_the_other_description_sources() {
+        assert!(Cli::try_parse_from([
+            "kf",
+            "issue",
+            "create",
+            "--name",
+            "N",
+            "--description-file",
+            "d.md"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "kf",
+            "issue",
+            "create",
+            "--name",
+            "N",
+            "--description",
+            "D",
+            "--description-file",
+            "d.md"
+        ])
+        .is_err());
+        assert!(
+            Cli::try_parse_from(["kf", "issue", "edit", "E613", "--description-file", "d.md"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "kf",
+            "issue",
+            "edit",
+            "E613",
+            "--append-description",
+            "A",
+            "--description-file",
+            "d.md"
+        ])
+        .is_err());
+    }
 }

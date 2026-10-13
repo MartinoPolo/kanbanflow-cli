@@ -86,8 +86,11 @@ pub struct CreateArgs {
     #[arg(long)]
     pub name: String,
     /// Issue description (Markdown, as the board renders it).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "description_file")]
     pub description: Option<String>,
+    /// Read the description from a file.
+    #[arg(long, value_name = "FILE")]
+    pub description_file: Option<PathBuf>,
     /// Issue color.
     #[arg(long, value_enum, ignore_case = true)]
     pub color: Option<IssueColor>,
@@ -150,8 +153,11 @@ pub struct EditArgs {
     #[arg(long)]
     pub name: Option<String>,
     /// Replace the description.
-    #[arg(long, conflicts_with = "append_description")]
+    #[arg(long, conflicts_with_all = ["append_description", "description_file"])]
     pub description: Option<String>,
+    /// Replace the description with the contents of a file.
+    #[arg(long, value_name = "FILE", conflicts_with = "append_description")]
+    pub description_file: Option<PathBuf>,
     /// Append to the description, separated by a blank line (lossless merge).
     #[arg(long, value_name = "TEXT")]
     pub append_description: Option<String>,
@@ -300,7 +306,7 @@ fn create(context: &Context, args: CreateArgs) -> anyhow::Result<()> {
     let payload = CreateIssue {
         name: args.name,
         column_id,
-        description: args.description,
+        description: description_text(args.description, args.description_file.as_deref())?,
         color: args.color.map(|color| color.as_str().to_string()),
         responsible_user_id: create_responsible_user_id(
             args.responsible.as_deref(),
@@ -684,7 +690,7 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     };
     update.description = match &args.append_description {
         Some(addition) => Some(append_description(issue.description.as_deref(), addition)),
-        None => args.description,
+        None => description_text(args.description, args.description_file.as_deref())?,
     };
     if let Some(responsible) = &args.responsible {
         update.responsible_user_id = Some(
@@ -712,7 +718,7 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
 
     let changes = serde_json::to_value(&update).context("building the update payload")?;
     if changes.as_object().map(serde_json::Map::len) == Some(0) {
-        anyhow::bail!("Nothing to change: pass at least one of --name, --description, --append-description, --color, --add-label, --remove-label, --responsible.");
+        anyhow::bail!("Nothing to change: pass at least one of --name, --description, --description-file, --append-description, --color, --add-label, --remove-label, --responsible.");
     }
 
     context
@@ -733,6 +739,14 @@ fn edit(context: &Context, args: EditArgs) -> anyhow::Result<()> {
     }
     output::print_affected_issue(&issue);
     Ok(())
+}
+
+/// The description from `--description` or `--description-file`; clap rejects both.
+fn description_text(text: Option<String>, file: Option<&Path>) -> anyhow::Result<Option<String>> {
+    match file {
+        Some(path) => crate::files::read_text(path, "description").map(Some),
+        None => Ok(text),
+    }
 }
 
 /// Append to a description without touching what is already there; the blank

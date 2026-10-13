@@ -80,7 +80,7 @@ matching flags:
 ```bash
 kf issue create \
   --name "Fix expired session redirect loop" \
-  --description "$(cat notes.md)" \
+  --description-file notes.md \
   --color red \
   --to todo \
   --label AFK \
@@ -88,7 +88,7 @@ kf issue create \
   --json
 ```
 
-Flags: `--name` (required), `--description`, `--color`, `--to <state>`, `--label <name>`
+Flags: `--name` (required), `--description` or `--description-file <file>`, `--color`, `--to <state>`, `--label <name>`
 (repeatable), `--responsible me|<userId>|none` (defaults to you; `none` leaves the issue
 unassigned), `--attach <file>` (repeatable), `--grouping-date YYYY-MM-DD`, `--json`.
 

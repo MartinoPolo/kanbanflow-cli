@@ -207,8 +207,7 @@ fn comment_text(text: Option<String>, file: Option<PathBuf>) -> anyhow::Result<S
     match (text, file) {
         (Some(text), None) => Ok(text),
         (None, Some(path)) => {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading the comment text from {}", path.display()))?;
+            let text = crate::files::read_text(&path, "comment text")?;
             if text.trim().is_empty() {
                 anyhow::bail!("{} is empty; a comment needs text.", path.display());
             }
